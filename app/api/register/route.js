@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import { db } from '../../..//lib/firebaseAdmin';
-import bcrypt from 'bcryptjs';
 
 export async function POST(req) {
   try {
