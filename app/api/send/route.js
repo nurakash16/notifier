@@ -3,7 +3,6 @@ import { NextResponse } from 'next/server';
 import { db, fcm } from '@/lib/firebaseAdmin';
 import bcrypt from 'bcryptjs';
 
-const db = admin.firestore();
 async function auth(username, password) {
   const snap = await db.collection('users').doc(username).get();
   if (!snap.exists) return false;
