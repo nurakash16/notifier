@@ -2,6 +2,7 @@ export const runtime = 'nodejs';
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/firebaseAdmin';
 
+const db = admin.firestore();
 export async function GET(req) {
   try {
     const url = new URL(req.url);
