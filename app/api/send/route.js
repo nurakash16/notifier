@@ -63,9 +63,9 @@ export async function POST(req) {
         body,
       },
       data: {
-        from: username,
-        to,
-        body,
+        sender: username,   // 👈 was: from
+        toUser: to,         // 👈 was: to
+        msg: body,          // 👈 was: body
         ts: String(now),
       },
       topic,
