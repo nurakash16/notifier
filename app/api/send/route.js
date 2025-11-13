@@ -1,12 +1,6 @@
 // app/api/send/route.js
 import { NextResponse } from 'next/server';
-import { getFirestore } from 'firebase-admin/firestore';
-import { getMessaging } from 'firebase-admin/messaging';
-import { initFirebaseAdmin } from '../../../lib/firebaseAdmin'; // same helper you use in login/register
-
-initFirebaseAdmin();
-const db = getFirestore();
-const messaging = getMessaging();
+import { db, messaging } from '../../../lib/firebaseAdmin';  // 👈 same style as login/register
 
 /**
  * POST /api/send
@@ -56,7 +50,7 @@ export async function POST(req) {
       );
     }
 
-    // 3) Store the message
+    // 3) Save the message
     const now = Date.now();
     const msgRef = await db.collection('messages').add({
       from: username,
@@ -66,11 +60,11 @@ export async function POST(req) {
       createdAt: new Date(now),
     });
 
-    // 4) Send FCM push to the receiver's topic
+    // 4) Send FCM notification to user's topic
     const topic = `user_${to}`;
     const fcmPayload = {
       notification: {
-        title: username, // sender name
+        title: username,
         body,
       },
       data: {
@@ -87,13 +81,10 @@ export async function POST(req) {
       console.log('send: FCM ok', fcmRes);
     } catch (err) {
       console.error('send: FCM error', err);
-      // we still consider the message "sent" even if push fails
+      // still count as ok for now
     }
 
-    return NextResponse.json({
-      ok: true,
-      id: msgRef.id,
-    });
+    return NextResponse.json({ ok: true, id: msgRef.id });
   } catch (err) {
     console.error('send: server error', err);
     return NextResponse.json(
