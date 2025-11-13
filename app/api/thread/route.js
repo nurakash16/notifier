@@ -1,38 +1,37 @@
 // app/api/thread/route.js
 import { db } from '../../../lib/firebaseAdmin';
-import { NextResponse } from "next/server";
+import { NextResponse } from 'next/server';
 
 export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
-    const username = searchParams.get("username");
-    const password = searchParams.get("password");
-    const other = searchParams.get("with");
+    const username = searchParams.get('username');
+    const password = searchParams.get('password'); // accepted but ignored
+    const other = searchParams.get('with');
 
-    if (!username || !password || !other) {
+    if (!username || !other) {
       return NextResponse.json(
-        { ok: false, error: "missing fields" },
+        { ok: false, error: 'missing fields' },
         { status: 400 }
       );
     }
 
-    // auth
-    const userRef = db.collection("users").doc(username);
+    // just verify user exists, no extra password check
+    const userRef = db.collection('users').doc(username);
     const snap = await userRef.get();
-    if (!snap.exists || snap.data().password !== password) {
+    if (!snap.exists) {
       return NextResponse.json(
-        { ok: false, error: "auth failed" },
-        { status: 401 }
+        { ok: false, error: 'user not found' },
+        { status: 404 }
       );
     }
 
-    const participantsKey = [username, other].sort().join("_");
+    const participantsKey = [username, other].sort().join('_');
 
-    // query messages in this conversation
     const qSnap = await db
-      .collection("messages")
-      .where("participants", "==", participantsKey)
-      .orderBy("ts")
+      .collection('messages')
+      .where('participants', '==', participantsKey)
+      .orderBy('ts')
       .get();
 
     const messages = qSnap.docs.map((d) => ({
@@ -42,11 +41,10 @@ export async function GET(req) {
 
     return NextResponse.json({ ok: true, messages });
   } catch (e) {
-    console.error("thread error", e);
+    console.error('thread error', e);
     return NextResponse.json(
-      { ok: false, error: "server error" },
+      { ok: false, error: 'server error' },
       { status: 500 }
     );
   }
 }
-
