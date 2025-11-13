@@ -1,33 +1,61 @@
-export const runtime = 'nodejs';
-import { NextResponse } from 'next/server';
+// app/api/thread/route.js
 import { db } from '../../../lib/firebaseAdmin';
+import bcrypt from 'bcryptjs';
 
-export async function GET(req) {
+function threadId(a, b) {
+  return [a, b].sort().join('__');
+}
+
+export async function POST(req) {
   try {
-    const url = new URL(req.url);
-    const me    = url.searchParams.get('me');
-    const peer  = url.searchParams.get('peer');
-    const limit = parseInt(url.searchParams.get('limit') || '50', 10);
-    const before = parseInt(url.searchParams.get('before') || `${Date.now()}`, 10);
+    const { user, password, withUser } = await req.json();
 
-    if (!me || !peer) {
-      return NextResponse.json({ ok:false, error:'me/peer required' }, { status:400 });
+    if (!user || !password || !withUser) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'user, password, withUser required' }),
+        { status: 400 }
+      );
     }
 
-    const q1 = db.collection('messages')
-      .where('from','==',me).where('to','==',peer).where('ts','<', before)
-      .orderBy('ts','desc').limit(limit);
-    const q2 = db.collection('messages')
-      .where('from','==',peer).where('to','==',me).where('ts','<', before)
-      .orderBy('ts','desc').limit(limit);
+    // auth
+    const userRef = db.collection('users').doc(user);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'invalid credentials' }),
+        { status: 401 }
+      );
+    }
+    const userData = userSnap.data();
+    const ok = await bcrypt.compare(password, userData.passwordHash);
+    if (!ok) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'invalid credentials' }),
+        { status: 401 }
+      );
+    }
 
-    const [s1, s2] = await Promise.all([q1.get(), q2.get()]);
-    const items = [...s1.docs, ...s2.docs].map(d => d.data())
-      .sort((a,b)=>a.ts - b.ts);
+    const tid = threadId(user, withUser);
+    const threadRef = db.collection('threads').doc(tid);
+    const msgsSnap = await threadRef
+      .collection('messages')
+      .orderBy('createdAt', 'asc')
+      .limit(200) // last 200 messages
+      .get();
 
-    return NextResponse.json({ ok:true, items });
+    const messages = msgsSnap.docs.map((d) => ({
+      id: d.id,
+      ...d.data(),
+    }));
+
+    return new Response(JSON.stringify({ ok: true, messages }), {
+      status: 200,
+    });
   } catch (e) {
-    // If Firestore asks for an index, follow the console link once.
-    return NextResponse.json({ ok:false, error: e.message || 'Error' }, { status:500 });
+    console.error(e);
+    return new Response(
+      JSON.stringify({ ok: false, error: 'server error' }),
+      { status: 500 }
+    );
   }
 }

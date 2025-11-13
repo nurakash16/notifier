@@ -1,37 +1,80 @@
-export const runtime = 'nodejs';
-import { NextResponse } from 'next/server';
-import { db } from '../../../lib/firebaseAdmin';
+// app/api/send/route.js
+import { db, fcm } from '../../../lib/firebaseAdmin';
 import bcrypt from 'bcryptjs';
 
-async function auth(username, password) {
-  const snap = await db.collection('users').doc(username).get();
-  if (!snap.exists) return false;
-  return bcrypt.compare(password, snap.data().passwordHash);
+function threadId(a, b) {
+  return [a, b].sort().join('__');
 }
 
 export async function POST(req) {
   try {
-    const { username, password, to, body } = await req.json(); // username = "from"
-    if (!username || !password || !to || !body) {
-      return NextResponse.json({ ok:false, error:'Missing fields' }, { status:400 });
+    const { fromUser, password, toUser, text } = await req.json();
+
+    if (!fromUser || !password || !toUser || !text) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'fromUser, password, toUser, text required' }),
+        { status: 400 }
+      );
     }
-    if (!(await auth(username, password))) {
-      return NextResponse.json({ ok:false, error:'Unauthorized' }, { status:401 });
+
+    // 1) check sender credentials
+    const fromRef = db.collection('users').doc(fromUser);
+    const fromSnap = await fromRef.get();
+    if (!fromSnap.exists) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'invalid credentials' }),
+        { status: 401 }
+      );
+    }
+    const fromData = fromSnap.data();
+    const ok = await bcrypt.compare(password, fromData.passwordHash);
+    if (!ok) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'invalid credentials' }),
+        { status: 401 }
+      );
     }
 
-    const ts = Date.now();
+    // 2) check recipient exists
+    const toRef = db.collection('users').doc(toUser);
+    const toSnap = await toRef.get();
+    if (!toSnap.exists) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'recipient not found' }),
+        { status: 404 }
+      );
+    }
 
-    await db.collection('messages').add({ from: username, to, body, ts });
+    const tid = threadId(fromUser, toUser);
+    const threadRef = db.collection('threads').doc(tid);
+    await threadRef.set(
+      {
+        users: [fromUser, toUser],
+        updatedAt: Date.now(),
+      },
+      { merge: true }
+    );
 
-    // Push to recipient topic /topics/u_<username>
-    await fcm.send({
-      topic: `u_${to}`,
-      notification: { title: username, body },
-      android: { priority: 'high' },
+    const msgRef = threadRef.collection('messages').doc();
+    const msg = {
+      from: fromUser,
+      to: toUser,
+      text,
+      createdAt: Date.now(),
+    };
+    await msgRef.set(msg);
+
+    // OPTIONAL: send FCM push to "toUser" device topic, if you want
+    // e.g. topic = `user_${toUser}` and devices subscribe to it.
+
+    return new Response(JSON.stringify({ ok: true, message: msg }), {
+      status: 201,
     });
-
-    return NextResponse.json({ ok:true, ts });
   } catch (e) {
-    return NextResponse.json({ ok:false, error: e.message || 'Error' }, { status:500 });
+    console.error(e);
+    return new Response(
+      JSON.stringify({ ok: false, error: 'server error' }),
+      { status: 500 }
+    );
   }
 }

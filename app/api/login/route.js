@@ -1,19 +1,43 @@
-export const runtime = 'nodejs';
-import { NextResponse } from 'next/server';
+// app/api/login/route.js
 import { db } from '../../../lib/firebaseAdmin';
 import bcrypt from 'bcryptjs';
 
 export async function POST(req) {
   try {
     const { username, password } = await req.json();
-    const snap = await db.collection('users').doc(username).get();
-    if (!snap.exists) return NextResponse.json({ ok:false, error:'Invalid creds' }, { status:401 });
 
-    const ok = await bcrypt.compare(password, snap.data().passwordHash);
-    return ok
-      ? NextResponse.json({ ok:true })
-      : NextResponse.json({ ok:false, error:'Invalid creds' }, { status:401 });
+    if (!username || !password) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'username and password required' }),
+        { status: 400 }
+      );
+    }
+
+    const userRef = db.collection('users').doc(username);
+    const snap = await userRef.get();
+    if (!snap.exists) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'invalid credentials' }),
+        { status: 401 }
+      );
+    }
+
+    const user = snap.data();
+    const ok = await bcrypt.compare(password, user.passwordHash);
+    if (!ok) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'invalid credentials' }),
+        { status: 401 }
+      );
+    }
+
+    // no token, just confirm login
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
   } catch (e) {
-    return NextResponse.json({ ok:false, error: e.message || 'Error' }, { status:500 });
+    console.error(e);
+    return new Response(
+      JSON.stringify({ ok: false, error: 'server error' }),
+      { status: 500 }
+    );
   }
 }
