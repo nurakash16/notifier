@@ -1,61 +1,52 @@
 // app/api/thread/route.js
 import { db } from '../../../lib/firebaseAdmin';
-import bcrypt from 'bcryptjs';
+import { NextResponse } from "next/server";
 
-function threadId(a, b) {
-  return [a, b].sort().join('__');
-}
-
-export async function POST(req) {
+export async function GET(req) {
   try {
-    const { user, password, withUser } = await req.json();
+    const { searchParams } = new URL(req.url);
+    const username = searchParams.get("username");
+    const password = searchParams.get("password");
+    const other = searchParams.get("with");
 
-    if (!user || !password || !withUser) {
-      return new Response(
-        JSON.stringify({ ok: false, error: 'user, password, withUser required' }),
+    if (!username || !password || !other) {
+      return NextResponse.json(
+        { ok: false, error: "missing fields" },
         { status: 400 }
       );
     }
 
     // auth
-    const userRef = db.collection('users').doc(user);
-    const userSnap = await userRef.get();
-    if (!userSnap.exists) {
-      return new Response(
-        JSON.stringify({ ok: false, error: 'invalid credentials' }),
-        { status: 401 }
-      );
-    }
-    const userData = userSnap.data();
-    const ok = await bcrypt.compare(password, userData.passwordHash);
-    if (!ok) {
-      return new Response(
-        JSON.stringify({ ok: false, error: 'invalid credentials' }),
+    const userRef = db.collection("users").doc(username);
+    const snap = await userRef.get();
+    if (!snap.exists || snap.data().password !== password) {
+      return NextResponse.json(
+        { ok: false, error: "auth failed" },
         { status: 401 }
       );
     }
 
-    const tid = threadId(user, withUser);
-    const threadRef = db.collection('threads').doc(tid);
-    const msgsSnap = await threadRef
-      .collection('messages')
-      .orderBy('createdAt', 'asc')
-      .limit(200) // last 200 messages
+    const participantsKey = [username, other].sort().join("_");
+
+    // query messages in this conversation
+    const qSnap = await db
+      .collection("messages")
+      .where("participants", "==", participantsKey)
+      .orderBy("ts")
       .get();
 
-    const messages = msgsSnap.docs.map((d) => ({
+    const messages = qSnap.docs.map((d) => ({
       id: d.id,
       ...d.data(),
     }));
 
-    return new Response(JSON.stringify({ ok: true, messages }), {
-      status: 200,
-    });
+    return NextResponse.json({ ok: true, messages });
   } catch (e) {
-    console.error(e);
-    return new Response(
-      JSON.stringify({ ok: false, error: 'server error' }),
+    console.error("thread error", e);
+    return NextResponse.json(
+      { ok: false, error: "server error" },
       { status: 500 }
     );
   }
 }
+

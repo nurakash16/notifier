@@ -1,79 +1,66 @@
 // app/api/send/route.js
-import { db, fcm } from '../../../lib/firebaseAdmin';
-import bcrypt from 'bcryptjs';
-
-function threadId(a, b) {
-  return [a, b].sort().join('__');
-}
+import { NextResponse } from "next/server";
+import { db, messaging } from "../../../lib/firebaseAdmin"; 
 
 export async function POST(req) {
   try {
-    const { fromUser, password, toUser, text } = await req.json();
+    const { username, password, to, body } = await req.json();
 
-    if (!fromUser || !password || !toUser || !text) {
-      return new Response(
-        JSON.stringify({ ok: false, error: 'fromUser, password, toUser, text required' }),
+    if (!username || !password || !to || !body) {
+      return NextResponse.json(
+        { ok: false, error: "missing fields" },
         { status: 400 }
       );
     }
 
-    // 1) check sender credentials
-    const fromRef = db.collection('users').doc(fromUser);
-    const fromSnap = await fromRef.get();
-    if (!fromSnap.exists) {
-      return new Response(
-        JSON.stringify({ ok: false, error: 'invalid credentials' }),
-        { status: 401 }
-      );
-    }
-    const fromData = fromSnap.data();
-    const ok = await bcrypt.compare(password, fromData.passwordHash);
-    if (!ok) {
-      return new Response(
-        JSON.stringify({ ok: false, error: 'invalid credentials' }),
+    // 1) auth sender
+    const userRef = db.collection("users").doc(username);
+    const snap = await userRef.get();
+    if (!snap.exists) {
+      return NextResponse.json(
+        { ok: false, error: "user not found" },
         { status: 401 }
       );
     }
 
-    // 2) check recipient exists
-    const toRef = db.collection('users').doc(toUser);
-    const toSnap = await toRef.get();
-    if (!toSnap.exists) {
-      return new Response(
-        JSON.stringify({ ok: false, error: 'recipient not found' }),
-        { status: 404 }
+    const data = snap.data();
+    if (data.password !== password) {
+      return NextResponse.json(
+        { ok: false, error: "invalid password" },
+        { status: 401 }
       );
     }
 
-    const tid = threadId(fromUser, toUser);
-    const threadRef = db.collection('threads').doc(tid);
-    await threadRef.set(
-      {
-        users: [fromUser, toUser],
-        updatedAt: Date.now(),
-      },
-      { merge: true }
-    );
+    // 2) save message
+    const ts = Date.now();
+    const participantsKey = [username, to].sort().join("_");
 
-    const msgRef = threadRef.collection('messages').doc();
-    const msg = {
-      from: fromUser,
-      to: toUser,
-      text,
-      createdAt: Date.now(),
-    };
-    await msgRef.set(msg);
-
-    // OPTIONAL: send FCM push to "toUser" device topic, if you want
-    // e.g. topic = `user_${toUser}` and devices subscribe to it.
-
-    return new Response(JSON.stringify({ ok: true, message: msg }), {
-      status: 201,
+    const msgDoc = await db.collection("messages").add({
+      from: username,
+      to,
+      body,
+      ts,
+      participants: participantsKey,
     });
+
+    // 3) send FCM to the receiver's personal topic
+    await messaging.send({
+      topic: `user_${to}`,
+      notification: {
+        title: username,
+        body,
+      },
+      data: {
+        from: username,
+        body,
+      },
+    });
+
+    return NextResponse.json({ ok: true, id: msgDoc.id });
   } catch (e) {
-    console.error(e);
-    return new Response(
-      JSON.stringify({ ok: false, error: 'server error' }),
+    console.error("send error", e);
+    return NextResponse.json(
+      { ok: false, error: "server error" },
       { status: 500 }
     );
   }

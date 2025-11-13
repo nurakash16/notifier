@@ -1,5 +1,5 @@
-// app/api/register/route.js
-import { db } from '../../../lib/firebaseAdmin';
+import { NextResponse } from 'next/server';
+import { db } from '../../..//lib/firebaseAdmin';
 import bcrypt from 'bcryptjs';
 
 export async function POST(req) {
@@ -7,8 +7,8 @@ export async function POST(req) {
     const { username, password } = await req.json();
 
     if (!username || !password) {
-      return new Response(
-        JSON.stringify({ ok: false, error: 'username and password required' }),
+      return NextResponse.json(
+        { ok: false, error: 'username and password required' },
         { status: 400 }
       );
     }
@@ -16,25 +16,25 @@ export async function POST(req) {
     const userRef = db.collection('users').doc(username);
     const snap = await userRef.get();
     if (snap.exists) {
-      return new Response(
-        JSON.stringify({ ok: false, error: 'username already taken' }),
-        { status: 409 }
+      return NextResponse.json(
+        { ok: false, error: 'username already exists' },
+        { status: 400 }
       );
     }
 
-    const hash = await bcrypt.hash(password, 10);
-
+    const passwordHash = await bcrypt.hash(password, 10);
     await userRef.set({
       username,
-      passwordHash: hash,
-      createdAt: Date.now(),
+      passwordHash,
+      createdAt: new Date().toISOString(),
     });
 
-    return new Response(JSON.stringify({ ok: true }), { status: 201 });
-  } catch (e) {
-    console.error(e);
-    return new Response(
-      JSON.stringify({ ok: false, error: 'server error' }),
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    console.error('REGISTER ERROR:', err);
+    // TEMP: expose message so we see what's wrong
+    return NextResponse.json(
+      { ok: false, error: `server error: ${err.message}` },
       { status: 500 }
     );
   }
