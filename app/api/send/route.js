@@ -1,6 +1,6 @@
 export const runtime = 'nodejs';
 import { NextResponse } from 'next/server';
-import { db, fcm } from '@/lib/firebaseAdmin';
+import { db } from '../../../lib/firebaseAdmin';
 import bcrypt from 'bcryptjs';
 
 async function auth(username, password) {
