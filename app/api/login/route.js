@@ -3,6 +3,7 @@ import { NextResponse } from 'next/server';
 import { db } from '@/lib/firebaseAdmin';
 import bcrypt from 'bcryptjs';
 
+const db = admin.firestore();
 export async function POST(req) {
   try {
     const { username, password } = await req.json();
