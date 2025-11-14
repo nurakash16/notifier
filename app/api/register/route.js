@@ -1,5 +1,6 @@
+// app/api/register/route.js
 import { NextResponse } from 'next/server';
-import { db } from '../../..//lib/firebaseAdmin';
+import { db } from '../../../lib/firebaseAdmin';  // fixed path, no double //
 
 export async function POST(req) {
   try {
@@ -21,17 +22,16 @@ export async function POST(req) {
       );
     }
 
-    const passwordHash = await bcrypt.hash(password, 10);
+    // 🔥 No bcrypt — store raw password to match login logic
     await userRef.set({
       username,
-      passwordHash,
+      password,                      // <= same field your login uses
       createdAt: new Date().toISOString(),
     });
 
     return NextResponse.json({ ok: true });
   } catch (err) {
     console.error('REGISTER ERROR:', err);
-    // TEMP: expose message so we see what's wrong
     return NextResponse.json(
       { ok: false, error: `server error: ${err.message}` },
       { status: 500 }
