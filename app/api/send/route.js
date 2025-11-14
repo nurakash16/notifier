@@ -45,6 +45,7 @@ export async function POST(req) {
     // 3) Save the message (IMPORTANT: add `participants`)
     const now = Date.now();
     const participants = [username, to].sort().join('_'); // e.g. "alice_bob"
+    const participantsArr = [username, to];
 
     const msgRef = await db.collection('messages').add({
       from: username,
@@ -52,6 +53,7 @@ export async function POST(req) {
       body,
       ts: now,
       participants,
+      participantsArr,
       createdAt: new Date(now),
     });
 

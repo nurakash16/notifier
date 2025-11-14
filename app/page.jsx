@@ -1,5 +1,6 @@
 'use client';
 import { useState } from 'react';
+import Link from 'next/link';
 
 export default function Home() {
   const [title, setTitle] = useState('Ping to everyone!');
@@ -61,6 +62,25 @@ export default function Home() {
         </button>
 
         {msg && <div className={`toast ${ok ? 'ok' : 'err'}`}>{ok ? '✅' : '⚠️'} {msg}</div>}
+        
+        <div style={{ marginTop: 24 }}>
+          <Link
+            href="/chat"
+            style={{
+              display: 'inline-block',
+              padding: '10px 18px',
+              borderRadius: 999,
+              background: '#4F46E5',
+              color: '#fff',
+              textDecoration: 'none',
+              fontSize: 14,
+              fontWeight: 500,
+            }}
+          >
+            Open Web Chat
+          </Link>
+        </div>
+
       </section>
 
       {/* Global + component styles */}
