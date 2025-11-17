@@ -9,7 +9,7 @@ export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
     const username = searchParams.get('username');
-    const password = searchParams.get('password'); // currently unused
+    const password = searchParams.get('password'); // unused
 
     if (!username) {
       return NextResponse.json(
@@ -18,7 +18,7 @@ export async function GET(req) {
       );
     }
 
-    // Just verify user exists
+    // Optional: verify user exists (1 read). You *can* remove this later to save reads.
     const userRef = db.collection('users').doc(username);
     const userSnap = await userRef.get();
     if (!userSnap.exists) {
@@ -28,40 +28,25 @@ export async function GET(req) {
       );
     }
 
-    // No orderBy here to avoid composite index requirement.
+    // Read only conversation summaries that involve this user
     const qSnap = await db
-      .collection('messages')
+      .collection('conversations')
       .where('participantsArr', 'array-contains', username)
+      .orderBy('lastTs', 'desc')
+      .limit(30) // max 50 conversations
       .get();
 
-    // Sort in memory by ts DESC
-    const docs = qSnap.docs
-      .map((d) => d.data())
-      .sort((a, b) => (b.ts || 0) - (a.ts || 0));
-
-    const map = new Map(); // otherUser -> convo summary
-
-    for (const d of docs) {
-      const from = d.from;
-      const to = d.to;
+    const conversations = qSnap.docs.map((doc) => {
+      const data = doc.data();
       const other =
-        from === username ? to :
-        to === username ? from :
-        null;
+        (data.participantsArr || []).find((u) => u !== username) || null;
 
-      if (!other) continue;
-      if (!map.has(other)) {
-        map.set(other, {
-          other,
-          lastBody: d.body || '',
-          lastTs: d.ts || 0,
-        });
-      }
-    }
-
-    const conversations = Array.from(map.values()).sort(
-      (a, b) => b.lastTs - a.lastTs
-    );
+      return {
+        other,
+        lastBody: data.lastBody || '',
+        lastTs: data.lastTs || 0,
+      };
+    });
 
     return NextResponse.json({ ok: true, conversations });
   } catch (e) {

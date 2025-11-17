@@ -2,39 +2,33 @@
 
 import { useEffect, useState, useRef } from 'react';
 
+// 🔥 Firestore realtime imports
+import { db } from '../../lib/firebaseClient'; // <-- change this path to your firebase config
+import {
+  collection,
+  query,
+  where,
+  orderBy,
+  limitToLast,
+  onSnapshot,
+} from 'firebase/firestore';
+
 // ---------- Message bubble ----------
 function MessageBubble({ me, msg }) {
   const isMe = msg.from === me;
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        justifyContent: isMe ? 'flex-end' : 'flex-start',
-        marginBottom: 6,
-      }}
-    >
+    <div className={`flex mb-1 ${isMe ? 'justify-end' : 'justify-start'}`}>
       <div
-        style={{
-          maxWidth: '72%',
-          padding: '8px 12px',
-          borderRadius: isMe ? '18px 18px 4px 18px' : '18px 18px 18px 4px',
-          backgroundColor: isMe ? '#2563EB' : '#F3F4F6',
-          color: isMe ? '#FFFFFF' : '#111827',
-          fontSize: 14,
-          lineHeight: 1.4,
-          whiteSpace: 'pre-wrap',
-          boxShadow: isMe ? '0 4px 18px rgba(37,99,235,0.25)' : 'none',
-        }}
+        className={`max-w-[72%] px-3 py-2 text-sm leading-snug whitespace-pre-wrap rounded-2xl shadow-sm
+        ${
+          isMe
+            ? 'bg-blue-600 text-white rounded-br-sm shadow-blue-500/30'
+            : 'bg-slate-100 text-slate-900 rounded-bl-sm'
+        }`}
       >
         {!isMe && (
-          <div
-            style={{
-              fontSize: 8,
-              opacity: 0.5,
-              marginBottom: 2,
-            }}
-          >
+          <div className="mb-0.5 text-[9px] uppercase tracking-wide text-slate-500">
             {msg.from}
           </div>
         )}
@@ -51,10 +45,11 @@ export default function ChatPage() {
   const [password, setPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(true);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [mode, setMode] = useState('login'); // 'login' | 'register'
+  const [mode, setMode] = useState('login');
 
   // chat state
-  const [other, setOther] = useState('');
+  const [other, setOther] = useState(''); // active conversation
+  const [otherInput, setOtherInput] = useState(''); // textbox
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState('');
 
@@ -65,9 +60,8 @@ export default function ChatPage() {
   const [status, setStatus] = useState('');
   const [loadingAuth, setLoadingAuth] = useState(false);
 
-  const threadPollRef = useRef(null);
-  const convPollRef = useRef(null);
   const listRef = useRef(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // ---- load saved auth (stay logged in) ----
   useEffect(() => {
@@ -103,52 +97,60 @@ export default function ChatPage() {
     })();
   }, [isLoggedIn, username]);
 
-  // auto-scroll chat
+  // auto-scroll to bottom on messages change
   useEffect(() => {
     if (listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
   }, [messages]);
 
-  // ---- poll thread ----
+  // ⭐ REALTIME THREAD (Firestore onSnapshot, scoped to a single pair)
   useEffect(() => {
-    if (!isLoggedIn || !other) return;
+    if (!isLoggedIn || !other || !username) return;
 
-    const loadThread = async () => {
-      try {
-        const params = new URLSearchParams({
-          username,
-          password,
-          with: other,
-        });
-        const res = await fetch(`/api/thread?${params.toString()}`);
-        const data = await res.json();
-        if (!data.ok) {
-          console.error('thread error', data.error);
-          return;
-        }
-        setMessages(data.messages || []);
-      } catch (e) {
-        console.error('thread fetch error', e);
+    // clear old messages when switching conversation
+    setMessages([]);
+
+    // This must match how you build `participants` in /api/send:
+    // const participants = [username, to].sort().join('_');
+    const participantsKey = [username, other].sort().join('_');
+
+    const q = query(
+      collection(db, 'messages'),
+      where('participants', '==', participantsKey),
+      orderBy('ts', 'asc'),
+      limitToLast(30) // only last 100 for THIS pair, on server
+    );
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const docs = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        }));
+
+        // `docs` are already only between username & other
+        setMessages(docs);
+      },
+      (err) => {
+        console.error('onSnapshot error', err);
       }
-    };
-
-    loadThread();
-    threadPollRef.current = setInterval(loadThread, 3000);
+    );
 
     return () => {
-      if (threadPollRef.current) {
-        clearInterval(threadPollRef.current);
-        threadPollRef.current = null;
-      }
+      unsubscribe();
     };
-  }, [isLoggedIn, other, username, password]);
+  }, [isLoggedIn, username, other]);
 
-  // ---- poll conversations ----
+
+  // ---- conversations: load once after login (no polling) ----
   useEffect(() => {
     if (!isLoggedIn) return;
 
-    const loadConversations = async () => {
+    let cancelled = false;
+
+    (async () => {
       try {
         const params = new URLSearchParams({
           username,
@@ -160,22 +162,28 @@ export default function ChatPage() {
           console.error('conversations error', data.error);
           return;
         }
-        setConversations(data.conversations || []);
+        if (!cancelled) {
+          setConversations(data.conversations || []);
+        }
       } catch (e) {
         console.error('conversations fetch error', e);
       }
-    };
-
-    loadConversations();
-    convPollRef.current = setInterval(loadConversations, 5000);
+    })();
 
     return () => {
-      if (convPollRef.current) {
-        clearInterval(convPollRef.current);
-        convPollRef.current = null;
-      }
+      cancelled = true;
     };
-  }, [isLoggedIn, username, password]);
+  }, [isLoggedIn, username]);
+
+  // ---- open conversation helper ----
+  function openConversation(rawName) {
+    const name = rawName.trim();
+    if (!name) return;
+
+    setOther(name); // triggers realtime listener via useEffect
+    setOtherInput(name);
+    setSidebarOpen(false);
+  }
 
   // ---- auth handlers ----
   async function handleAuth() {
@@ -224,6 +232,7 @@ export default function ChatPage() {
   function handleLogout() {
     setIsLoggedIn(false);
     setOther('');
+    setOtherInput('');
     setMessages([]);
     setConversations([]);
     setStatus('');
@@ -246,14 +255,23 @@ export default function ChatPage() {
     if (!body) return;
     setText('');
 
+    const now = Date.now();
     const localMsg = {
-      id: `local-${Date.now()}`,
+      id: `local-${now}`,
       from: username,
       to: other,
       body,
-      ts: Date.now(),
+      ts: now,
     };
-    setMessages((prev) => [...prev, localMsg]);
+
+    // optimistic update; will be replaced by realtime data from Firestore
+    setMessages((prev) => {
+      let combined = [...prev, localMsg];
+      if (combined.length > 100) {
+        combined = combined.slice(combined.length - 100);
+      }
+      return combined;
+    });
 
     try {
       const res = await fetch('/api/send', {
@@ -271,489 +289,254 @@ export default function ChatPage() {
         setStatus(data.error || 'Send failed');
       } else {
         setStatus('');
+        // Realtime listener will pull the actual saved message
       }
     } catch (e) {
       setStatus(e.message || 'Send failed');
     }
   }
 
-  // ---------------- UI ----------------
-  return (
-    <div
-      style={{
-        minHeight: '100vh',
-        background: '#F3F4F6',
-        display: 'flex',
-        justifyContent: 'center',
-        alignItems: 'center',
-        padding: '24px 12px',
-      }}
-    >
-      <div
-        style={{
-          width: '100%',
-          maxWidth: 980,
-          borderRadius: 24,
-          background: '#FFFFFF',
-          boxShadow:
-            '0 18px 45px rgba(15,23,42,0.16), 0 0 0 1px rgba(209,213,219,0.8)',
-          padding: 24,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 16,
-        }}
-      >
-        {/* header */}
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginBottom: 4,
-          }}
-        >
-          <div>
-            <h1
-              style={{
-                margin: 0,
-                fontSize: 24,
-                fontWeight: 700,
-                color: '#0051ffff',
-              }}
-            >
-              Notifier Web Chat
-            </h1>
-            <div
-              style={{
-                fontSize: 13,
-                color: '#6B7280',
-                marginTop: 4,
-              }}
-            >
-              Talk between registered users
-            </div>
-          </div>
+  // ---------- AUTH UI ----------
+  if (!isLoggedIn) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-sky-100 via-slate-50 to-indigo-100 px-4">
+        <div className="w-full max-w-md bg-white/90 backdrop-blur rounded-2xl shadow-2xl shadow-slate-900/10 border border-white/60 p-6">
+          <h1 className="text-xl font-semibold text-slate-900 mb-1">
+            {mode === 'login' ? 'Welcome back 👋' : 'Create your account'}
+          </h1>
+          <p className="text-xs text-slate-500 mb-4">
+            Simple demo chat — choose any username and password.
+          </p>
 
-          {isLoggedIn && (
-            <div
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'flex-end',
-                gap: 4,
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 15,
-                  color: '#4B5563',
-                }}
-              >
-                Signed in as <b>{username}</b>
-              </div>
-              <button
-                type="button"
-                onClick={handleLogout}
-                style={{
-                  borderRadius: 999,
-                  border: '1px solid #062c7aff',
-                  background: '#fcb7b7ff',
-                  color: '#000000ff',
-                  fontSize: 12,
-                  padding: '4px 12px',
-                  cursor: 'pointer',
-                }}
-              >
-                Log out
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* auth panel */}
-        {!isLoggedIn && (
-          <div
-            style={{
-              borderRadius: 16,
-              background: '#F9FAFB',
-              border: '1px solid #E5E7EB',
-              padding: 16,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 10,
-            }}
-          >
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                type="button"
-                onClick={() => setMode('login')}
-                style={{
-                  flex: 1,
-                  padding: '7px 0',
-                  borderRadius: 999,
-                  border: 'none',
-                  cursor: 'pointer',
-                  background:
-                    mode === 'login' ? '#2563EB' : 'rgba(37,99,235,0.04)',
-                  color: mode === 'login' ? '#FFFFFF' : '#111827',
-                  fontSize: 13,
-                  fontWeight: 500,
-                }}
-              >
-                Login
-              </button>
-              <button
-                type="button"
-                onClick={() => setMode('register')}
-                style={{
-                  flex: 1,
-                  padding: '7px 0',
-                  borderRadius: 999,
-                  border: 'none',
-                  cursor: 'pointer',
-                  background:
-                    mode === 'register' ? '#2563EB' : 'rgba(37,99,235,0.04)',
-                  color: mode === 'register' ? '#FFFFFF' : '#111827',
-                  fontSize: 13,
-                  fontWeight: 500,
-                }}
-              >
-                Register
-              </button>
-            </div>
-
+          <div className="space-y-2">
             <input
+              className="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition"
               placeholder="Username"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '9px 11px',
-                borderRadius: 12,
-                border: '1px solid #E5E7EB',
-                background: '#FFFFFF',
-                color: '#111827',
-                fontSize: 14,
-              }}
             />
             <input
-              placeholder="Password"
               type="password"
+              className="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition"
+              placeholder="Password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '9px 11px',
-                borderRadius: 12,
-                border: '1px solid #E5E7EB',
-                background: '#FFFFFF',
-                color: '#111827',
-                fontSize: 14,
-              }}
             />
+          </div>
 
-            <label
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                fontSize: 12,
-                color: '#4B5563',
-                marginTop: 2,
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={rememberMe}
-                onChange={(e) => setRememberMe(e.target.checked)}
-              />
-              <span>Stay logged in on this browser</span>
-            </label>
+          <label className="mt-2 flex items-center gap-2 text-xs text-slate-600">
+            <input
+              type="checkbox"
+              className="h-3 w-3 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+              checked={rememberMe}
+              onChange={(e) => setRememberMe(e.target.checked)}
+            />
+            <span>Remember me on this device</span>
+          </label>
 
+          {status && (
+            <div className="mt-2 text-xs text-red-500">
+              {status}
+            </div>
+          )}
+
+          <button
+            onClick={handleAuth}
+            disabled={loadingAuth}
+            className="mt-4 w-full py-2 text-sm font-medium rounded-full bg-gradient-to-r from-blue-600 to-indigo-500 text-white shadow-md shadow-blue-500/30 hover:shadow-lg hover:-translate-y-[1px] active:translate-y-[1px] transition disabled:opacity-60 disabled:translate-y-0 disabled:shadow-none"
+          >
+            {loadingAuth
+              ? 'Please wait...'
+              : mode === 'login'
+              ? 'Login'
+              : 'Register'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() =>
+              setMode((m) => (m === 'login' ? 'register' : 'login'))
+            }
+            className="mt-2 w-full py-2 text-xs rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50 transition"
+          >
+            {mode === 'login'
+              ? "Don't have an account? Register"
+              : 'Already have an account? Login'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ---------- MAIN CHAT UI ----------
+  return (
+    <div className="h-screen bg-slate-100">
+      <div className="mx-auto h-full max-w-6xl bg-white shadow-xl shadow-slate-900/10 md:rounded-2xl md:overflow-hidden flex">
+        {/* SIDEBAR (mobile = slide-in) */}
+        <aside
+          className={`fixed inset-y-0 left-0 z-30 w-50 bg-white border-r border-slate-200
+            transform transition-transform duration-300 ease-out
+            md:static md:translate-x-0 md:w-80
+            ${
+              sidebarOpen
+                ? 'translate-x-0'
+                : '-translate-x-full md:translate-x-0'
+            }`}
+        >
+          {/* Header */}
+          <div className="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-slate-50/80">
+            <div className="flex flex-col">
+              <span className="text-xs text-slate-500">Signed in as</span>
+              <span className="text-sm font-semibold text-slate-900">
+                {username}
+              </span>
+            </div>
             <button
-              type="button"
-              onClick={handleAuth}
-              disabled={loadingAuth}
-              style={{
-                marginTop: 4,
-                padding: '9px 0',
-                borderRadius: 999,
-                border: 'none',
-                background: loadingAuth ? '#93C5FD' : '#2563EB',
-                color: '#FFFFFF',
-                fontSize: 14,
-                fontWeight: 500,
-                cursor: loadingAuth ? 'default' : 'pointer',
-                boxShadow: '0 10px 24px rgba(37,99,235,0.35)',
-              }}
+              onClick={handleLogout}
+              className="text-[11px] text-slate-600 rounded-full px-3 py-1 border border-slate-200 hover:bg-slate-100 transition"
             >
-              {loadingAuth
-                ? 'Please wait...'
-                : mode === 'login'
-                ? 'Login'
-                : 'Register'}
+              Logout
             </button>
           </div>
+
+          {/* Start chat input */}
+          <div className="px-3 py-2 border-b border-slate-200 flex items-center gap-2">
+            <input
+              className="flex-1 px-3 py-1.5 text-xs rounded-lg border border-slate-200 outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition"
+              placeholder="Start chat with username..."
+              value={otherInput}
+              onChange={(e) => setOtherInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  openConversation(otherInput);
+                }
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => openConversation(otherInput)}
+              className="px-2 py-1 text-[11px] rounded-full bg-blue-600 text-white hover:bg-blue-700 transition"
+            >
+              Start
+            </button>
+          </div>
+
+          {/* Conversations list */}
+          <div className="h-[calc(100%-88px)] overflow-y-auto">
+            {conversations.map((c) => (
+              <button
+                key={c.other}
+                onClick={() => openConversation(c.other)}
+                className={`w-full text-left px-3 py-2 border-b border-slate-50 hover:bg-slate-50 transition flex flex-col ${
+                  c.other === other ? 'bg-blue-50/80' : ''
+                }`}
+              >
+                <div className="text-sm font-semibold text-slate-900">
+                  {c.other || '(unknown)'}
+                </div>
+                <div className="mt-0.5 text-[11px] text-slate-500 truncate">
+                  {c.lastBody && c.lastBody.length > 40
+                    ? c.lastBody.slice(0, 40) + '…'
+                    : c.lastBody || ''}
+                </div>
+              </button>
+            ))}
+            {conversations.length === 0 && (
+              <div className="px-3 py-4 text-[11px] text-slate-400">
+                No recent conversations yet.
+              </div>
+            )}
+          </div>
+        </aside>
+
+        {/* Mobile overlay when sidebar open */}
+        {sidebarOpen && (
+          <div
+            className="fixed inset-0 z-20 bg-black/30 md:hidden"
+            onClick={() => setSidebarOpen(false)}
+          />
         )}
 
-        {/* main two-column area */}
-        {isLoggedIn && (
-          <div
-            style={{
-              display: 'flex',
-              gap: 14,
-              minHeight: 320,
-            }}
-          >
-            {/* LEFT: conversations */}
-            <div
-              style={{
-                width: 260,
-                borderRadius: 16,
-                background: '#F9FAFB',
-                border: '1px solid #E5E7EB',
-                padding: 10,
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 8,
-              }}
+        {/* MAIN CHAT AREA */}
+        <main className="flex-1 flex flex-col">
+          {/* Header */}
+          <header className="flex items-center gap-2 px-3 py-2 border-b border-slate-200 bg-slate-50/60">
+            {/* Mobile menu button */}
+            <button
+              onClick={() => setSidebarOpen((v) => !v)}
+              className="md:hidden inline-flex flex-col items-center justify-center h-8 w-8 rounded-full hover:bg-slate-200 text-slate-700 transition"
             >
-              <div
-                style={{
-                  fontSize: 16,
-                  color: '#6B7280',
-                  padding: '2px 2px 4px',
-                  fontWeight: 500,
-                }}
-              >
-                Conversations
+              <span className="block w-4 h-0.5 bg-slate-700 rounded-full mb-[3px]" />
+              <span className="block w-4 h-0.5 bg-slate-700 rounded-full mb-[3px]" />
+              <span className="block w-4 h-0.5 bg-slate-700 rounded-full" />
+            </button>
+
+            <div className="flex flex-col">
+              <span className="text-xs uppercase tracking-wide text-slate-500">
+                {other ? 'Conversation' : 'No conversation selected'}
+              </span>
+              <span className="text-sm font-semibold text-slate-900">
+                {other ? other : 'Choose someone to chat with'}
+              </span>
+            </div>
+          </header>
+
+          {/* Messages (bottom-anchored) */}
+          <section
+            ref={listRef}
+            className="flex-1 overflow-y-auto bg-slate-50"
+          >
+            {messages.length === 0 ? (
+              <div className="h-full flex items-center justify-center px-3 py-2">
+                <p className="text-xs text-slate-400">
+                  {other
+                    ? 'No messages yet — say hi!'
+                    : 'Pick or type a username to start chatting.'}
+                </p>
               </div>
-              <div
-                style={{
-                  maxHeight: 360,
-                  overflowY: 'auto',
-                  paddingRight: 2,
-                }}
-              >
-                {conversations.length === 0 ? (
-                  <div
-                    style={{
-                      fontSize: 12,
-                      color: '#9CA3AF',
-                      marginTop: 10,
-                      textAlign: 'center',
-                    }}
-                  >
-                    No conversations yet
-                  </div>
-                ) : (
-                  conversations.map((c) => (
-                    <button
-                      key={c.other}
-                      type="button"
-                      onClick={() => setOther(c.other)}
-                      style={{
-                        width: '100%',
-                        textAlign: 'left',
-                        border: 'none',
-                        cursor: 'pointer',
-                        background:
-                          c.other === other
-                            ? 'rgba(37,99,235,0.08)'
-                            : 'transparent',
-                        borderRadius: 12,
-                        padding: '6px 8px',
-                        marginBottom: 4,
-                        display: 'flex',
-                        gap: 8,
-                        alignItems: 'center',
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: 28,
-                          height: 28,
-                          borderRadius: '999px',
-                          background: '#E5E7EB',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          fontSize: 13,
-                          fontWeight: 600,
-                          color: '#374151',
-                        }}
-                      >
-                        {c.other.charAt(0).toUpperCase()}
-                      </div>
-                      <div style={{ flex: 1 }}>
-                        <div
-                          style={{
-                            fontSize: 14,
-                            fontWeight: 500,
-                            color: '#111827',
-                          }}
-                        >
-                          {c.other}
-                        </div>
-                        <div
-                          style={{
-                            fontSize: 11,
-                            color: '#6B7280',
-                            whiteSpace: 'nowrap',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                          }}
-                        >
-                          {c.lastBody}
-                        </div>
-                      </div>
-                    </button>
-                  ))
-                )}
+            ) : (
+              <div className="flex flex-col justify-end min-h-full px-3 py-2">
+                {messages.map((m) => (
+                  <MessageBubble key={m.id} me={username} msg={m} />
+                ))}
               </div>
+            )}
+          </section>
+
+          {/* Input row */}
+          <footer className="border-t border-slate-200 bg-white px-3 py-2">
+            <div className="flex items-center gap-2">
+              <input
+                className="flex-1 px-3 py-2 text-sm rounded-full border border-slate-200 outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition disabled:bg-slate-100 disabled:text-slate-400"
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
+                placeholder={
+                  other ? 'Type a message and press Enter…' : 'Choose someone first'
+                }
+                disabled={!other}
+              />
+              <button
+                onClick={handleSend}
+                disabled={!other}
+                className="px-4 py-2 text-sm font-medium rounded-full bg-blue-600 text-white shadow-sm shadow-blue-500/30 hover:bg-blue-700 active:bg-blue-800 active:shadow-none disabled:bg-slate-300 disabled:text-slate-600 disabled:shadow-none disabled:cursor-not-allowed transition"
+              >
+                Send
+              </button>
             </div>
 
-            {/* RIGHT: chat thread */}
-            <div
-              style={{
-                flex: 1,
-                borderRadius: 16,
-                background: '#F9FAFB',
-                border: '1px solid #E5E7EB',
-                padding: 10,
-                display: 'flex',
-                flexDirection: 'column',
-              }}
-            >
-              {/* partner selector */}
-              <div
-                style={{
-                  display: 'flex',
-                  gap: 8,
-                  alignItems: 'center',
-                  marginBottom: 6,
-                }}
-              >
-                <input
-                  placeholder="Chat with (username)"
-                  value={other}
-                  onChange={(e) => setOther(e.target.value)}
-                  style={{
-                    flex: 1,
-                    padding: '7px 10px',
-                    borderRadius: 999,
-                    border: '1px solid #E5E7EB',
-                    background: '#FFFFFF',
-                    color: '#111827',
-                    fontSize: 14,
-                  }}
-                />
+            {status && (
+              <div className="mt-1 text-[11px] text-red-500 text-center">
+                {status}
               </div>
-
-              {/* messages */}
-              <div
-                ref={listRef}
-                style={{
-                  flex: 1,
-                  minHeight: 210,
-                  maxHeight: 380,
-                  overflowY: 'auto',
-                  padding: '6px 4px 8px',
-                }}
-              >
-                {!other ? (
-                  <div
-                    style={{
-                      fontSize: 13,
-                      color: '#9CA3AF',
-                      marginTop: 20,
-                      textAlign: 'center',
-                    }}
-                  >
-                    Choose someone on the left or type a username above.
-                  </div>
-                ) : messages.length === 0 ? (
-                  <div
-                    style={{
-                      fontSize: 13,
-                      color: '#9CA3AF',
-                      marginTop: 20,
-                      textAlign: 'center',
-                    }}
-                  >
-                    No messages yet. Say hi 👋
-                  </div>
-                ) : (
-                  messages.map((m) => (
-                    <MessageBubble key={m.id} me={username} msg={m} />
-                  ))
-                )}
-              </div>
-
-              {/* input row */}
-              <div
-                style={{
-                  display: 'flex',
-                  gap: 8,
-                  marginTop: 4,
-                }}
-              >
-                <input
-                  placeholder="Type a message"
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSend();
-                    }
-                  }}
-                  style={{
-                    flex: 1,
-                    padding: '8px 10px',
-                    borderRadius: 999,
-                    border: '1px solid #E5E7EB',
-                    background: '#FFFFFF',
-                    color: '#111827',
-                    fontSize: 14,
-                  }}
-                />
-                <button
-                  type="button"
-                  onClick={handleSend}
-                  style={{
-                    padding: '0 18px',
-                    borderRadius: 999,
-                    border: 'none',
-                    background: '#2563EB',
-                    color: '#FFFFFF',
-                    fontSize: 14,
-                    fontWeight: 500,
-                    cursor: 'pointer',
-                    height: 40,
-                    boxShadow: '0 8px 20px rgba(37,99,235,0.3)',
-                  }}
-                >
-                  Send
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {status && (
-          <div
-            style={{
-              marginTop: 4,
-              fontSize: 12,
-              color: status.toLowerCase().includes('error')
-                ? '#DC2626'
-                : '#2563EB',
-            }}
-          >
-            {status}
-          </div>
-        )}
+            )}
+          </footer>
+        </main>
       </div>
     </div>
   );

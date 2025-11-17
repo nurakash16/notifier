@@ -1,6 +1,7 @@
 // app/api/register/route.js
 import { NextResponse } from 'next/server';
-import { db } from '../../../lib/firebaseAdmin';  // fixed path, no double //
+import { db } from '../../../lib/firebaseAdmin';
+import bcrypt from 'bcryptjs';
 
 export async function POST(req) {
   try {
@@ -22,10 +23,12 @@ export async function POST(req) {
       );
     }
 
-    // 🔥 No bcrypt — store raw password to match login logic
+    // ✅ hash the password and store as passwordHash
+    const passwordHash = await bcrypt.hash(password, 10);
+
     await userRef.set({
       username,
-      password,                      // <= same field your login uses
+      passwordHash, // 👈 matches login's user.passwordHash
       createdAt: new Date().toISOString(),
     });
 

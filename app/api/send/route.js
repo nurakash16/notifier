@@ -2,11 +2,6 @@
 import { NextResponse } from 'next/server';
 import { db, messaging } from '../../../lib/firebaseAdmin';
 
-/**
- * POST /api/send
- * body: { username, password, to, body }
- * (password is accepted but NOT re-checked; we trust that login already did it)
- */
 export async function POST(req) {
   try {
     const { username, password, to, body } = await req.json();
@@ -42,12 +37,12 @@ export async function POST(req) {
       );
     }
 
-    // 3) Save the message (IMPORTANT: add `participants`)
+    // 3) Save the message
     const now = Date.now();
-    const participants = [username, to].sort().join('_'); // e.g. "alice_bob"
+    const participants = [username, to].sort().join('_'); // "alice_bob"
     const participantsArr = [username, to];
 
-    const msgRef = await db.collection('messages').add({
+    const msgData = {
       from: username,
       to,
       body,
@@ -55,9 +50,25 @@ export async function POST(req) {
       participants,
       participantsArr,
       createdAt: new Date(now),
-    });
+    };
 
-    // 4) Send FCM notification to per-user topic
+    const msgRef = await db.collection('messages').add(msgData);
+
+    // 4) Upsert conversation summary (1 doc per pair)
+    const convRef = db.collection('conversations').doc(participants);
+    await convRef.set(
+      {
+        participants,
+        participantsArr,
+        lastBody: body,
+        lastTs: now,
+        lastFrom: username,
+        updatedAt: new Date(now),
+      },
+      { merge: true }
+    );
+
+    // 5) Send FCM notification to per-user topic
     const topic = `user_${to}`;
     const fcmPayload = {
       notification: {
@@ -65,9 +76,9 @@ export async function POST(req) {
         body,
       },
       data: {
-        sender: username,   // 👈 was: from
-        toUser: to,         // 👈 was: to
-        msg: body,          // 👈 was: body
+        sender: username,
+        toUser: to,
+        msg: body,
         ts: String(now),
       },
       topic,
