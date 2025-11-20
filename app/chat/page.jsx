@@ -13,26 +13,90 @@ import {
   onSnapshot,
 } from 'firebase/firestore';
 
+/**
+ * Parse our "reply-encoded" message bodies.
+ * Format (when it's a reply):
+ *   "↪ alice: some preview text\n\nactual message text"
+ */
+function parseReplyBody(rawBody) {
+  if (typeof rawBody !== 'string') {
+    return {
+      isReply: false,
+      replyAuthor: '',
+      replySnippet: '',
+      mainText: '',
+    };
+  }
+
+  if (rawBody.startsWith('↪ ') && rawBody.includes('\n\n')) {
+    const [header, main] = rawBody.split('\n\n', 2);
+    const headerStripped = header.slice(2).trim(); // remove "↪ "
+    let replyAuthor = '';
+    let replySnippet = headerStripped;
+
+    const idx = headerStripped.indexOf(':');
+    if (idx !== -1) {
+      replyAuthor = headerStripped.slice(0, idx).trim();
+      replySnippet = headerStripped.slice(idx + 1).trim();
+    }
+
+    return {
+      isReply: true,
+      replyAuthor,
+      replySnippet,
+      mainText: main,
+    };
+  }
+
+  return {
+    isReply: false,
+    replyAuthor: '',
+    replySnippet: '',
+    mainText: rawBody,
+  };
+}
+
 // ---------- Message bubble ----------
-function MessageBubble({ me, msg }) {
+function MessageBubble({ me, msg, onReply }) {
   const isMe = msg.from === me;
+  const { isReply, replyAuthor, replySnippet, mainText } = parseReplyBody(msg.body || '');
 
   return (
-    <div className={`flex mb-1 ${isMe ? 'justify-end' : 'justify-start'}`}>
+    <div
+      className={`flex mb-1 ${isMe ? 'justify-end' : 'justify-start'}`}
+    >
       <div
-        className={`max-w-[72%] px-3 py-2 text-sm leading-snug whitespace-pre-wrap rounded-2xl shadow-sm
+        className={`max-w-[72%] px-3 py-2 text-sm leading-snug whitespace-pre-wrap rounded-2xl shadow-sm cursor-pointer
         ${
           isMe
-            ? 'bg-blue-600 text-white rounded-br-sm shadow-blue-500/30'
-            : 'bg-slate-100 text-slate-900 rounded-bl-sm'
+            ? 'bg-blue-500 text-white rounded-br-sm shadow-blue-500/30'
+            : 'bg-slate-200 text-slate-900 rounded-bl-sm'
         }`}
+        // click a message to start replying to it
+        onClick={() => onReply && onReply(msg)}
       >
         {!isMe && (
           <div className="mb-0.5 text-[9px] uppercase tracking-wide text-slate-500">
             {msg.from}
           </div>
         )}
-        {msg.body}
+
+        {isReply && (
+          <div
+            className={`mb-1 px-2 py-1 rounded-md border-l-2 text-[10px] ${
+              isMe
+                ? 'bg-green-700 border-blue-200 text-blue-50'
+                : 'bg-blue-200 border-slate-400 text-slate-700'
+            }`}
+          >
+            <div className="font-semibold">
+              {replyAuthor || msg.from}
+            </div>
+            <div className="truncate">{replySnippet}</div>
+          </div>
+        )}
+
+        <div>{mainText}</div>
       </div>
     </div>
   );
@@ -52,6 +116,9 @@ export default function ChatPage() {
   const [otherInput, setOtherInput] = useState(''); // textbox
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState('');
+
+  // reply state
+  const [replyTo, setReplyTo] = useState(null); // Chat message we're replying to
 
   // conversations
   const [conversations, setConversations] = useState([]);
@@ -119,7 +186,7 @@ export default function ChatPage() {
       collection(db, 'messages'),
       where('participants', '==', participantsKey),
       orderBy('ts', 'asc'),
-      limitToLast(30) // only last 100 for THIS pair, on server
+      limitToLast(30) // only last 30 for THIS pair
     );
 
     const unsubscribe = onSnapshot(
@@ -130,7 +197,6 @@ export default function ChatPage() {
           ...doc.data(),
         }));
 
-        // `docs` are already only between username & other
         setMessages(docs);
       },
       (err) => {
@@ -142,7 +208,6 @@ export default function ChatPage() {
       unsubscribe();
     };
   }, [isLoggedIn, username, other]);
-
 
   // ---- conversations: load once after login (no polling) ----
   useEffect(() => {
@@ -183,6 +248,7 @@ export default function ChatPage() {
     setOther(name); // triggers realtime listener via useEffect
     setOtherInput(name);
     setSidebarOpen(false);
+    setReplyTo(null); // clear reply when switching chats
   }
 
   // ---- auth handlers ----
@@ -235,6 +301,7 @@ export default function ChatPage() {
     setOtherInput('');
     setMessages([]);
     setConversations([]);
+    setReplyTo(null);
     setStatus('');
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem('notifierWebAuth');
@@ -251,9 +318,21 @@ export default function ChatPage() {
       setStatus('Choose someone to chat with');
       return;
     }
-    const body = text.trim();
-    if (!body) return;
+    const rawText = text.trim();
+    if (!rawText) return;
+
+    let body = rawText;
+
+    // If replying, encode the reply header at the top of the body
+    if (replyTo) {
+      const parsed = parseReplyBody(replyTo.body || '');
+      const snippetSource = parsed.mainText || replyTo.body || '';
+      const preview = snippetSource.replace(/\s+/g, ' ').slice(0, 80);
+      body = `↪ ${replyTo.from}: ${preview}\n\n${rawText}`;
+    }
+
     setText('');
+    setReplyTo(null);
 
     const now = Date.now();
     const localMsg = {
@@ -497,14 +576,39 @@ export default function ChatPage() {
             ) : (
               <div className="flex flex-col justify-end min-h-full px-3 py-2">
                 {messages.map((m) => (
-                  <MessageBubble key={m.id} me={username} msg={m} />
+                  <MessageBubble
+                    key={m.id}
+                    me={username}
+                    msg={m}
+                    onReply={setReplyTo}
+                  />
                 ))}
               </div>
             )}
           </section>
 
-          {/* Input row */}
+          {/* Input row + reply preview */}
           <footer className="border-t border-slate-200 bg-white px-3 py-2">
+            {replyTo && (
+              <div className="mb-2 flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px]">
+                <div className="border-l-4 border-blue-500 pl-2">
+                  <div className="font-semibold text-slate-700">
+                    Replying to {replyTo.from}
+                  </div>
+                  <div className="text-slate-500 line-clamp-1">
+                    {parseReplyBody(replyTo.body || '').mainText}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setReplyTo(null)}
+                  className="ml-2 text-slate-400 hover:text-slate-600 px-1"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
             <div className="flex items-center gap-2">
               <input
                 className="flex-1 px-3 py-2 text-sm rounded-full border border-slate-200 outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition disabled:bg-slate-100 disabled:text-slate-400"
