@@ -1,136 +1,104 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
+import Link from 'next/link';
+import { 
+  Send, LogOut, MessageSquare, Search, 
+  ChevronLeft, X, Radio, ArrowLeft 
+} from 'lucide-react';
 
-// 🔥 Firestore realtime imports
-import { db } from '../../lib/firebaseClient'; // <-- change this path to your firebase config
+// 🔥 Firestore imports
+import { db } from '../../lib/firebaseClient'; 
 import {
-  collection,
-  query,
-  where,
-  orderBy,
-  limitToLast,
-  onSnapshot,
+  collection, query, where, orderBy, limitToLast, onSnapshot
 } from 'firebase/firestore';
 
-/**
- * Parse our "reply-encoded" message bodies.
- * Format (when it's a reply):
- *   "↪ alice: some preview text\n\nactual message text"
- */
-function parseReplyBody(rawBody) {
-  if (typeof rawBody !== 'string') {
-    return {
-      isReply: false,
-      replyAuthor: '',
-      replySnippet: '',
-      mainText: '',
-    };
-  }
+// --- UTILITIES ---
 
+const getInitials = (name) => (name ? name.substring(0, 2).toUpperCase() : '?');
+
+const formatTime = (ts) => {
+  if (!ts) return '';
+  return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+};
+
+const getDateLabel = (ts) => {
+  const date = new Date(ts);
+  const now = new Date();
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+
+  if (date.toDateString() === now.toDateString()) return 'Today';
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+};
+
+// --- COMPONENTS ---
+
+const Avatar = ({ name, size = "md", className = "" }) => {
+  const sizeClasses = {
+    sm: "w-8 h-8 text-[10px]",
+    md: "w-10 h-10 text-xs",
+  };
+  
+  // Generate consistent pastel color based on name
+  const colors = [
+    'bg-blue-100 text-blue-600',
+    'bg-indigo-100 text-indigo-600',
+    'bg-emerald-100 text-emerald-600',
+    'bg-rose-100 text-rose-600',
+    'bg-amber-100 text-amber-600',
+    'bg-violet-100 text-violet-600',
+  ];
+  const colorIndex = name ? name.length % colors.length : 0;
+
+  return (
+    <div className={`${sizeClasses[size]} ${colors[colorIndex]} ${className} flex items-center justify-center rounded-full font-bold border-2 border-white shadow-sm shrink-0`}>
+      {getInitials(name)}
+    </div>
+  );
+};
+
+function parseReplyBody(rawBody) {
+  if (typeof rawBody !== 'string') return { isReply: false, mainText: '' };
   if (rawBody.startsWith('↪ ') && rawBody.includes('\n\n')) {
     const [header, main] = rawBody.split('\n\n', 2);
-    const headerStripped = header.slice(2).trim(); // remove "↪ "
-    let replyAuthor = '';
-    let replySnippet = headerStripped;
-
+    const headerStripped = header.slice(2).trim();
     const idx = headerStripped.indexOf(':');
-    if (idx !== -1) {
-      replyAuthor = headerStripped.slice(0, idx).trim();
-      replySnippet = headerStripped.slice(idx + 1).trim();
-    }
-
     return {
       isReply: true,
-      replyAuthor,
-      replySnippet,
+      replyAuthor: idx !== -1 ? headerStripped.slice(0, idx).trim() : '',
+      replySnippet: idx !== -1 ? headerStripped.slice(idx + 1).trim() : headerStripped,
       mainText: main,
     };
   }
-
-  return {
-    isReply: false,
-    replyAuthor: '',
-    replySnippet: '',
-    mainText: rawBody,
-  };
+  return { isReply: false, mainText: rawBody };
 }
 
-// ---------- Message bubble ----------
-function MessageBubble({ me, msg, onReply }) {
-  const isMe = msg.from === me;
-  const { isReply, replyAuthor, replySnippet, mainText } = parseReplyBody(msg.body || '');
+// --- MAIN CHAT COMPONENT ---
 
-  return (
-    <div
-      className={`flex mb-1 ${isMe ? 'justify-end' : 'justify-start'}`}
-    >
-      <div
-        className={`max-w-[72%] px-3 py-2 text-sm leading-snug whitespace-pre-wrap rounded-2xl shadow-sm cursor-pointer
-        ${
-          isMe
-            ? 'bg-blue-500 text-white rounded-br-sm shadow-blue-500/30'
-            : 'bg-slate-200 text-slate-900 rounded-bl-sm'
-        }`}
-        // click a message to start replying to it
-        onClick={() => onReply && onReply(msg)}
-      >
-        {!isMe && (
-          <div className="mb-0.5 text-[9px] uppercase tracking-wide text-slate-500">
-            {msg.from}
-          </div>
-        )}
-
-        {isReply && (
-          <div
-            className={`mb-1 px-2 py-1 rounded-md border-l-2 text-[10px] ${
-              isMe
-                ? 'bg-green-700 border-blue-200 text-blue-50'
-                : 'bg-blue-200 border-slate-400 text-slate-700'
-            }`}
-          >
-            <div className="font-semibold">
-              {replyAuthor || msg.from}
-            </div>
-            <div className="truncate">{replySnippet}</div>
-          </div>
-        )}
-
-        <div>{mainText}</div>
-      </div>
-    </div>
-  );
-}
-
-// ---------- Page ----------
 export default function ChatPage() {
-  // auth
+  // Auth State
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [rememberMe, setRememberMe] = useState(true);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [mode, setMode] = useState('login');
-
-  // chat state
-  const [other, setOther] = useState(''); // active conversation
-  const [otherInput, setOtherInput] = useState(''); // textbox
-  const [messages, setMessages] = useState([]);
-  const [text, setText] = useState('');
-
-  // reply state
-  const [replyTo, setReplyTo] = useState(null); // Chat message we're replying to
-
-  // conversations
-  const [conversations, setConversations] = useState([]);
-
-  // misc UI
-  const [status, setStatus] = useState('');
+  const [authMode, setAuthMode] = useState('login'); 
   const [loadingAuth, setLoadingAuth] = useState(false);
+  const [rememberMe, setRememberMe] = useState(true);
 
-  const listRef = useRef(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  // App State
+  const [conversations, setConversations] = useState([]);
+  const [activeChat, setActiveChat] = useState(null); 
+  const [messages, setMessages] = useState([]);
+  const [inputText, setInputText] = useState('');
+  const [replyTo, setReplyTo] = useState(null);
+  const [status, setStatus] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
 
-  // ---- load saved auth (stay logged in) ----
+  // Refs
+  const scrollRef = useRef(null);
+
+  // 1. Check LocalStorage
   useEffect(() => {
     if (typeof window === 'undefined') return;
     try {
@@ -143,505 +111,355 @@ export default function ChatPage() {
           setIsLoggedIn(true);
         }
       }
-    } catch {
-      // ignore
-    }
+    } catch {}
   }, []);
 
-  // ---- ask for Notification permission when logged in ----
+  // 2. Load Conversations
   useEffect(() => {
-    if (!isLoggedIn || !username) return;
-    if (typeof window === 'undefined') return;
-    if (!('Notification' in window)) return;
-
+    if (!isLoggedIn) return;
     (async () => {
       try {
-        const perm = await Notification.requestPermission();
-        console.log('Notifications permission:', perm);
-      } catch (e) {
-        console.error('Notification permission error', e);
-      }
+        const params = new URLSearchParams({ username, password });
+        const res = await fetch(`/api/conversations?${params.toString()}`);
+        const data = await res.json();
+        if (data.ok) setConversations(data.conversations || []);
+      } catch (e) { console.error(e); }
     })();
-  }, [isLoggedIn, username]);
+  }, [isLoggedIn, username, password]);
 
-  // auto-scroll to bottom on messages change
+  // 3. Realtime Messages
   useEffect(() => {
-    if (listRef.current) {
-      listRef.current.scrollTop = listRef.current.scrollHeight;
-    }
-  }, [messages]);
+    if (!isLoggedIn || !activeChat || !username) return;
 
-  // ⭐ REALTIME THREAD (Firestore onSnapshot, scoped to a single pair)
-  useEffect(() => {
-    if (!isLoggedIn || !other || !username) return;
-
-    // clear old messages when switching conversation
-    setMessages([]);
-
-    // This must match how you build `participants` in /api/send:
-    // const participants = [username, to].sort().join('_');
-    const participantsKey = [username, other].sort().join('_');
-
+    setMessages([]); 
+    const participantsKey = [username, activeChat].sort().join('_');
+    
     const q = query(
       collection(db, 'messages'),
       where('participants', '==', participantsKey),
       orderBy('ts', 'asc'),
-      limitToLast(30) // only last 30 for THIS pair
+      limitToLast(50)
     );
 
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        const docs = snapshot.docs.map((doc) => ({
-          id: doc.id,
-          ...doc.data(),
-        }));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const docs = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+      setMessages(docs);
+    }, (err) => console.error(err));
 
-        setMessages(docs);
-      },
-      (err) => {
-        console.error('onSnapshot error', err);
-      }
-    );
+    return () => unsubscribe();
+  }, [isLoggedIn, username, activeChat]);
 
-    return () => {
-      unsubscribe();
-    };
-  }, [isLoggedIn, username, other]);
-
-  // ---- conversations: load once after login (no polling) ----
+  // 4. Auto-scroll
   useEffect(() => {
-    if (!isLoggedIn) return;
-
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const params = new URLSearchParams({
-          username,
-          password,
-        });
-        const res = await fetch(`/api/conversations?${params.toString()}`);
-        const data = await res.json();
-        if (!data.ok) {
-          console.error('conversations error', data.error);
-          return;
-        }
-        if (!cancelled) {
-          setConversations(data.conversations || []);
-        }
-      } catch (e) {
-        console.error('conversations fetch error', e);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [isLoggedIn, username]);
-
-  // ---- open conversation helper ----
-  function openConversation(rawName) {
-    const name = rawName.trim();
-    if (!name) return;
-
-    setOther(name); // triggers realtime listener via useEffect
-    setOtherInput(name);
-    setSidebarOpen(false);
-    setReplyTo(null); // clear reply when switching chats
-  }
-
-  // ---- auth handlers ----
-  async function handleAuth() {
-    if (!username || !password) {
-      setStatus('Please enter username & password');
-      return;
+    if (scrollRef.current) {
+      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
     }
-    setLoadingAuth(true);
-    setStatus('');
+  }, [messages, replyTo]);
+
+  // --- HANDLERS ---
+
+  const handleAuth = async (e) => {
+    e.preventDefault();
+    if (!username || !password) return setStatus('Please fill in all fields');
+    setLoadingAuth(true); setStatus('');
     try {
-      const res = await fetch(
-        mode === 'login' ? '/api/login' : '/api/register',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password }),
-        }
-      );
-      const data = await res.json();
-      if (!data.ok) {
-        setStatus(data.error || 'Error');
-      } else {
-        setIsLoggedIn(true);
-        setStatus(
-          mode === 'login' ? 'Logged in' : 'Registered successfully'
-        );
-
-        if (typeof window !== 'undefined') {
-          if (rememberMe) {
-            window.localStorage.setItem(
-              'notifierWebAuth',
-              JSON.stringify({ username, password })
-            );
-          } else {
-            window.localStorage.removeItem('notifierWebAuth');
-          }
-        }
-      }
-    } catch (e) {
-      setStatus(e.message || 'Network error');
-    } finally {
-      setLoadingAuth(false);
-    }
-  }
-
-  function handleLogout() {
-    setIsLoggedIn(false);
-    setOther('');
-    setOtherInput('');
-    setMessages([]);
-    setConversations([]);
-    setReplyTo(null);
-    setStatus('');
-    if (typeof window !== 'undefined') {
-      window.localStorage.removeItem('notifierWebAuth');
-    }
-  }
-
-  // ---- send message ----
-  async function handleSend() {
-    if (!isLoggedIn) {
-      setStatus('Login first');
-      return;
-    }
-    if (!other) {
-      setStatus('Choose someone to chat with');
-      return;
-    }
-    const rawText = text.trim();
-    if (!rawText) return;
-
-    let body = rawText;
-
-    // If replying, encode the reply header at the top of the body
-    if (replyTo) {
-      const parsed = parseReplyBody(replyTo.body || '');
-      const snippetSource = parsed.mainText || replyTo.body || '';
-      const preview = snippetSource.replace(/\s+/g, ' ').slice(0, 80);
-      body = `↪ ${replyTo.from}: ${preview}\n\n${rawText}`;
-    }
-
-    setText('');
-    setReplyTo(null);
-
-    const now = Date.now();
-    const localMsg = {
-      id: `local-${now}`,
-      from: username,
-      to: other,
-      body,
-      ts: now,
-    };
-
-    // optimistic update; will be replaced by realtime data from Firestore
-    setMessages((prev) => {
-      let combined = [...prev, localMsg];
-      if (combined.length > 100) {
-        combined = combined.slice(combined.length - 100);
-      }
-      return combined;
-    });
-
-    try {
-      const res = await fetch('/api/send', {
+      const endpoint = authMode === 'login' ? '/api/login' : '/api/register';
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username,
-          password,
-          to: other,
-          body,
-        }),
+        body: JSON.stringify({ username, password }),
       });
       const data = await res.json();
       if (!data.ok) {
-        setStatus(data.error || 'Send failed');
+        setStatus(data.error || 'Authentication failed');
       } else {
-        setStatus('');
-        // Realtime listener will pull the actual saved message
+        setIsLoggedIn(true);
+        if (rememberMe) {
+          window.localStorage.setItem('notifierWebAuth', JSON.stringify({ username, password }));
+        }
       }
-    } catch (e) {
-      setStatus(e.message || 'Send failed');
-    }
-  }
+    } catch (err) { setStatus('Network error'); }
+    finally { setLoadingAuth(false); }
+  };
 
-  // ---------- AUTH UI ----------
+  const handleLogout = () => {
+    setIsLoggedIn(false);
+    setActiveChat(null);
+    window.localStorage.removeItem('notifierWebAuth');
+  };
+
+  const handleSend = async () => {
+    if (!activeChat || !inputText.trim()) return;
+    
+    const rawText = inputText.trim();
+    let body = rawText;
+
+    if (replyTo) {
+      const parsed = parseReplyBody(replyTo.body || '');
+      const cleanSnippet = (parsed.mainText || replyTo.body || '').replace(/\s+/g, ' ').slice(0, 60);
+      body = `↪ ${replyTo.from}: ${cleanSnippet}\n\n${rawText}`;
+    }
+
+    const tempId = 'local-' + Date.now();
+    const newMsg = { id: tempId, from: username, to: activeChat, body, ts: Date.now() };
+    setMessages(prev => [...prev, newMsg]);
+    setInputText('');
+    setReplyTo(null);
+
+    try {
+      await fetch('/api/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, to: activeChat, body }),
+      });
+    } catch (e) { console.error(e); }
+  };
+
+  const groupedMessages = useMemo(() => {
+    const groups = [];
+    let lastDate = null;
+
+    messages.forEach((msg, index) => {
+      const dateLabel = getDateLabel(msg.ts);
+      if (dateLabel !== lastDate) {
+        groups.push({ type: 'date', label: dateLabel, id: `date-${dateLabel}-${index}` });
+        lastDate = dateLabel;
+      }
+      const isMe = msg.from === username;
+      const nextMsg = messages[index + 1];
+      const isLastInSequence = !nextMsg || nextMsg.from !== msg.from || (getDateLabel(nextMsg.ts) !== dateLabel);
+      groups.push({ type: 'message', data: msg, isMe, isLastInSequence, id: msg.id });
+    });
+    return groups;
+  }, [messages, username]);
+
+  const filteredConversations = conversations.filter(c => 
+    c.other.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  // --- LOGIN UI ---
   if (!isLoggedIn) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-sky-100 via-slate-50 to-indigo-100 px-4">
-        <div className="w-full max-w-md bg-white/90 backdrop-blur rounded-2xl shadow-2xl shadow-slate-900/10 border border-white/60 p-6">
-          <h1 className="text-xl font-semibold text-slate-900 mb-1">
-            {mode === 'login' ? 'Welcome back 👋' : 'Create your account'}
-          </h1>
-          <p className="text-xs text-slate-500 mb-4">
-            Simple demo chat — choose any username and password.
-          </p>
-
-          <div className="space-y-2">
-            <input
-              className="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition"
-              placeholder="Username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-            />
-            <input
-              type="password"
-              className="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition"
-              placeholder="Password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </div>
-
-          <label className="mt-2 flex items-center gap-2 text-xs text-slate-600">
-            <input
-              type="checkbox"
-              className="h-3 w-3 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-              checked={rememberMe}
-              onChange={(e) => setRememberMe(e.target.checked)}
-            />
-            <span>Remember me on this device</span>
-          </label>
-
-          {status && (
-            <div className="mt-2 text-xs text-red-500">
-              {status}
+      <div className="min-h-[100dvh] flex items-center justify-center bg-zinc-50 p-4 relative overflow-hidden">
+        <div className="absolute inset-0 bg-[radial-gradient(#e0e7ff_1px,transparent_1px)] [background-size:20px_20px] opacity-60"></div>
+        <div className="w-full max-w-sm bg-white/90 backdrop-blur rounded-3xl shadow-2xl border border-white z-10 p-8">
+          <div className="text-center mb-8">
+            <div className="w-14 h-14 bg-indigo-600 rounded-2xl mx-auto flex items-center justify-center shadow-lg shadow-indigo-300 mb-4">
+              <MessageSquare className="text-white" size={28} />
             </div>
-          )}
-
-          <button
-            onClick={handleAuth}
-            disabled={loadingAuth}
-            className="mt-4 w-full py-2 text-sm font-medium rounded-full bg-gradient-to-r from-blue-600 to-indigo-500 text-white shadow-md shadow-blue-500/30 hover:shadow-lg hover:-translate-y-[1px] active:translate-y-[1px] transition disabled:opacity-60 disabled:translate-y-0 disabled:shadow-none"
-          >
-            {loadingAuth
-              ? 'Please wait...'
-              : mode === 'login'
-              ? 'Login'
-              : 'Register'}
-          </button>
-
-          <button
-            type="button"
-            onClick={() =>
-              setMode((m) => (m === 'login' ? 'register' : 'login'))
-            }
-            className="mt-2 w-full py-2 text-xs rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50 transition"
-          >
-            {mode === 'login'
-              ? "Don't have an account? Register"
-              : 'Already have an account? Login'}
-          </button>
+            <h1 className="text-2xl font-bold text-zinc-900">Welcome Back</h1>
+            <p className="text-zinc-500 text-sm">Sign in to start chatting</p>
+          </div>
+          <form onSubmit={handleAuth} className="space-y-4">
+             <input 
+               value={username} onChange={e => setUsername(e.target.value)}
+               className="w-full px-4 py-3 rounded-xl bg-zinc-100 border-transparent focus:bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
+               placeholder="Username"
+             />
+             <input 
+               type="password"
+               value={password} onChange={e => setPassword(e.target.value)}
+               className="w-full px-4 py-3 rounded-xl bg-zinc-100 border-transparent focus:bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
+               placeholder="Password"
+             />
+             <button disabled={loadingAuth} className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-semibold shadow-lg shadow-indigo-200 transition">
+               {loadingAuth ? 'Loading...' : (authMode === 'login' ? 'Sign In' : 'Create Account')}
+             </button>
+             {status && <p className="text-red-500 text-xs text-center">{status}</p>}
+          </form>
+          <div className="mt-6 text-center">
+             <button type="button" onClick={() => setAuthMode(m => m === 'login' ? 'register' : 'login')} className="text-xs text-zinc-500 hover:text-indigo-600">
+                {authMode === 'login' ? "Need an account? Register" : "Have an account? Login"}
+             </button>
+          </div>
         </div>
       </div>
     );
   }
 
-  // ---------- MAIN CHAT UI ----------
+  // --- MAIN CHAT UI ---
   return (
-    <div className="h-screen bg-slate-100">
-      <div className="mx-auto h-full max-w-6xl bg-white shadow-xl shadow-slate-900/10 md:rounded-2xl md:overflow-hidden flex">
-        {/* SIDEBAR (mobile = slide-in) */}
-        <aside
-          className={`fixed inset-y-0 left-0 z-30 w-50 bg-white border-r border-slate-200
-            transform transition-transform duration-300 ease-out
-            md:static md:translate-x-0 md:w-80
-            ${
-              sidebarOpen
-                ? 'translate-x-0'
-                : '-translate-x-full md:translate-x-0'
-            }`}
-        >
-          {/* Header */}
-          <div className="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-slate-50/80">
-            <div className="flex flex-col">
-              <span className="text-xs text-slate-500">Signed in as</span>
-              <span className="text-sm font-semibold text-slate-900">
-                {username}
-              </span>
+    <div className="flex h-[100dvh] bg-zinc-50 overflow-hidden font-sans">
+      
+      {/* SIDEBAR */}
+      <aside className={`
+        flex flex-col bg-white border-r border-zinc-200 w-full md:w-80 lg:w-96
+        fixed inset-y-0 z-30 transition-transform duration-300
+        ${activeChat ? '-translate-x-full md:translate-x-0' : 'translate-x-0'} 
+        md:relative
+      `}>
+        {/* Sidebar Header */}
+        <div className="h-16 px-4 border-b border-zinc-100 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3">
+            <Avatar name={username} size="sm" />
+            <div>
+              <div className="font-bold text-zinc-800 text-sm">{username}</div>
+              <div className="text-[10px] text-green-600 flex items-center gap-1">● Online</div>
             </div>
-            <button
-              onClick={handleLogout}
-              className="text-[11px] text-slate-600 rounded-full px-3 py-1 border border-slate-200 hover:bg-slate-100 transition"
-            >
-              Logout
-            </button>
           </div>
+          <button onClick={handleLogout} className="p-2 text-zinc-400 hover:text-red-500 hover:bg-red-50 rounded-full transition">
+            <LogOut size={18} />
+          </button>
+        </div>
 
-          {/* Start chat input */}
-          <div className="px-3 py-2 border-b border-slate-200 flex items-center gap-2">
-            <input
-              className="flex-1 px-3 py-1.5 text-xs rounded-lg border border-slate-200 outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition"
-              placeholder="Start chat with username..."
-              value={otherInput}
-              onChange={(e) => setOtherInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  openConversation(otherInput);
-                }
-              }}
+        {/* Search */}
+        <div className="p-4 shrink-0 space-y-3">
+          <div className="relative">
+            <Search className="absolute left-3 top-2.5 text-zinc-400" size={16} />
+            <input 
+              value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+              placeholder="Search..."
+              className="w-full pl-9 pr-4 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:bg-white focus:border-indigo-400 outline-none transition"
             />
+          </div>
+          {/* BroadCast Page Button (Mobile Sidebar) */}
+          <Link href="/" className="flex items-center justify-center gap-2 w-full py-2 bg-indigo-50 text-indigo-600 text-xs font-medium rounded-xl hover:bg-indigo-100 transition md:hidden">
+            <Radio size={14} /> Go to Broadcast
+          </Link>
+        </div>
+
+        {/* List */}
+        <div className="flex-1 overflow-y-auto px-2 space-y-1">
+          {filteredConversations.map(c => (
             <button
-              type="button"
-              onClick={() => openConversation(otherInput)}
-              className="px-2 py-1 text-[11px] rounded-full bg-blue-600 text-white hover:bg-blue-700 transition"
+              key={c.other}
+              onClick={() => setActiveChat(c.other)}
+              className={`w-full p-3 rounded-xl flex items-center gap-3 transition-all ${activeChat === c.other ? 'bg-indigo-600 shadow-md shadow-indigo-200' : 'hover:bg-zinc-50'}`}
             >
-              Start
+              <Avatar name={c.other} className={activeChat === c.other ? 'bg-white text-indigo-700' : ''} />
+              <div className="flex-1 text-left min-w-0">
+                <div className={`text-sm font-semibold truncate ${activeChat === c.other ? 'text-white' : 'text-zinc-800'}`}>{c.other}</div>
+                <div className={`text-xs truncate ${activeChat === c.other ? 'text-indigo-100' : 'text-zinc-500'}`}>{c.lastBody}</div>
+              </div>
             </button>
+          ))}
+        </div>
+      </aside>
+
+      {/* CHAT AREA */}
+      <main className={`
+        flex-1 flex flex-col bg-slate-50 h-full relative z-10 
+        transition-transform duration-300 absolute inset-0 md:static md:translate-x-0
+        ${activeChat ? 'translate-x-0' : 'translate-x-full md:translate-x-0'}
+      `}>
+        
+        {/* Chat Header */}
+        <header className="h-16 px-4 bg-white/90 backdrop-blur border-b border-zinc-200 flex items-center justify-between shrink-0 shadow-sm z-20">
+          <div className="flex items-center gap-2">
+            <button onClick={() => setActiveChat(null)} className="md:hidden p-2 -ml-2 text-zinc-600 hover:bg-slate-200 rounded-full">
+              <ChevronLeft size={24} />
+            </button>
+            {activeChat ? (
+              <div className="flex items-center gap-3">
+                <Avatar name={activeChat} size="sm" />
+                <span className="font-bold text-zinc-800 text-sm">{activeChat}</span>
+              </div>
+            ) : <span className="text-zinc-400 text-sm">Select a chat</span>}
           </div>
 
-          {/* Conversations list */}
-          <div className="h-[calc(100%-88px)] overflow-y-auto">
-            {conversations.map((c) => (
-              <button
-                key={c.other}
-                onClick={() => openConversation(c.other)}
-                className={`w-full text-left px-3 py-2 border-b border-slate-50 hover:bg-slate-50 transition flex flex-col ${
-                  c.other === other ? 'bg-blue-50/80' : ''
-                }`}
-              >
-                <div className="text-sm font-semibold text-slate-900">
-                  {c.other || '(unknown)'}
-                </div>
-                <div className="mt-0.5 text-[11px] text-slate-500 truncate">
-                  {c.lastBody && c.lastBody.length > 40
-                    ? c.lastBody.slice(0, 40) + '…'
-                    : c.lastBody || ''}
-                </div>
-              </button>
-            ))}
-            {conversations.length === 0 && (
-              <div className="px-3 py-4 text-[11px] text-slate-400">
-                No recent conversations yet.
-              </div>
-            )}
+          {/* 🔥 RIGHT SIDE HEADER ICONS */}
+          <div className="flex items-center gap-2">
+             <Link 
+               href="/" 
+               title="Go to Broadcast Page"
+               className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-indigo-50 text-indigo-600 rounded-full text-xs font-semibold hover:bg-indigo-100 transition"
+             >
+               <Radio size={14} /> Broadcast
+             </Link>
           </div>
-        </aside>
+        </header>
 
-        {/* Mobile overlay when sidebar open */}
-        {sidebarOpen && (
-          <div
-            className="fixed inset-0 z-20 bg-black/30 md:hidden"
-            onClick={() => setSidebarOpen(false)}
-          />
-        )}
-
-        {/* MAIN CHAT AREA */}
-        <main className="flex-1 flex flex-col">
-          {/* Header */}
-          <header className="flex items-center gap-2 px-3 py-2 border-b border-slate-200 bg-slate-50/60">
-            {/* Mobile menu button */}
-            <button
-              onClick={() => setSidebarOpen((v) => !v)}
-              className="md:hidden inline-flex flex-col items-center justify-center h-8 w-8 rounded-full hover:bg-slate-200 text-slate-700 transition"
-            >
-              <span className="block w-4 h-0.5 bg-slate-700 rounded-full mb-[3px]" />
-              <span className="block w-4 h-0.5 bg-slate-700 rounded-full mb-[3px]" />
-              <span className="block w-4 h-0.5 bg-slate-700 rounded-full" />
-            </button>
-
-            <div className="flex flex-col">
-              <span className="text-xs uppercase tracking-wide text-slate-500">
-                {other ? 'Conversation' : 'No conversation selected'}
-              </span>
-              <span className="text-sm font-semibold text-slate-900">
-                {other ? other : 'Choose someone to chat with'}
-              </span>
-            </div>
-          </header>
-
-          {/* Messages (bottom-anchored) */}
-          <section
-            ref={listRef}
-            className="flex-1 overflow-y-auto bg-slate-50"
-          >
-            {messages.length === 0 ? (
-              <div className="h-full flex items-center justify-center px-3 py-2">
-                <p className="text-xs text-slate-400">
-                  {other
-                    ? 'No messages yet — say hi!'
-                    : 'Pick or type a username to start chatting.'}
-                </p>
+        {/* Messages */}
+        <div 
+          ref={scrollRef}
+          className="flex-1 overflow-y-auto p-4 space-y-1 bg-[#f0f4f8]"
+          style={{ backgroundImage: 'radial-gradient(#cbd5e1 1px, transparent 1px)', backgroundSize: '24px 24px' }}
+        >
+          {activeChat && groupedMessages.map((item) => {
+            if (item.type === 'date') return (
+              <div key={item.id} className="flex justify-center py-4">
+                <span className="bg-zinc-200/80 px-3 py-1 rounded-full text-[10px] font-bold text-zinc-600">{item.label}</span>
               </div>
-            ) : (
-              <div className="flex flex-col justify-end min-h-full px-3 py-2">
-                {messages.map((m) => (
-                  <MessageBubble
-                    key={m.id}
-                    me={username}
-                    msg={m}
-                    onReply={setReplyTo}
-                  />
-                ))}
-              </div>
-            )}
-          </section>
+            );
+            
+            const { isMe, data, isLastInSequence } = item;
+            const { isReply, replyAuthor, replySnippet, mainText } = parseReplyBody(data.body);
 
-          {/* Input row + reply preview */}
-          <footer className="border-t border-slate-200 bg-white px-3 py-2">
+            return (
+              <div key={item.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'} mb-1`}>
+                <div className={`flex max-w-[85%] md:max-w-[70%] items-end gap-2`}>
+                  
+                  {/* Left Avatar (Other) */}
+                  {!isMe && (
+                    <div className="w-8 shrink-0">
+                      {isLastInSequence && <Avatar name={data.from} size="sm" className="w-8 h-8 text-[10px]" />}
+                    </div>
+                  )}
+
+                  {/* Bubble */}
+                  <div className={`flex flex-col min-w-0 ${isMe ? 'items-end' : 'items-start'}`}>
+                    <div 
+                      onClick={() => setReplyTo(data)}
+                      className={`
+                        relative px-4 py-2 text-sm shadow-sm cursor-pointer transition-transform active:scale-[0.98]
+                        whitespace-pre-wrap break-words
+                        ${isMe 
+                          ? `bg-indigo-500 text-white rounded-2xl ${isLastInSequence ? 'rounded-br-sm' : ''}` 
+                          : `bg-white text-zinc-800 rounded-2xl ${isLastInSequence ? 'rounded-bl-sm' : ''}`
+                        }
+                      `}
+                    >
+                      {isReply && (
+                        <div className={`mb-2 rounded-lg p-2 text-xs border-l-4 overflow-hidden ${isMe ? 'bg-black/20 border-indigo-200 text-indigo-50' : 'bg-zinc-100 border-indigo-500 text-zinc-600'}`}>
+                          <div className="font-bold mb-0.5 opacity-90">{replyAuthor}</div>
+                          <div className="truncate opacity-80">{replySnippet}</div>
+                        </div>
+                      )}
+                      {mainText}
+                      <div className={`text-[9px] mt-1 flex justify-end gap-1 ${isMe ? 'text-indigo-200' : 'text-zinc-400'}`}>
+                        {formatTime(data.ts)} {isMe && '✓'}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Right Avatar (Me) */}
+                  {isMe && (
+                    <div className="w-8 shrink-0">
+                      {isLastInSequence && <Avatar name={username} size="sm" className="w-8 h-8 text-[10px]" />}
+                    </div>
+                  )}
+
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Input */}
+        {activeChat && (
+          <div className="bg-white px-4 py-3 border-t border-zinc-200 shrink-0">
             {replyTo && (
-              <div className="mb-2 flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px]">
-                <div className="border-l-4 border-blue-500 pl-2">
-                  <div className="font-semibold text-slate-700">
-                    Replying to {replyTo.from}
-                  </div>
-                  <div className="text-slate-500 line-clamp-1">
-                    {parseReplyBody(replyTo.body || '').mainText}
-                  </div>
+              <div className="flex items-center justify-between bg-indigo-50 p-2 mb-2 rounded-lg border border-indigo-100">
+                <div className="text-xs text-indigo-800 truncate px-2 border-l-2 border-indigo-500">
+                  Replying to <span className="font-bold">{replyTo.from}</span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setReplyTo(null)}
-                  className="ml-2 text-slate-400 hover:text-slate-600 px-1"
-                >
-                  ✕
-                </button>
+                <button onClick={() => setReplyTo(null)} className="p-1 hover:bg-indigo-200 rounded-full text-indigo-600"><X size={14} /></button>
               </div>
             )}
-
-            <div className="flex items-center gap-2">
+            <div className="flex items-end gap-2 max-w-4xl mx-auto">
               <input
-                className="flex-1 px-3 py-2 text-sm rounded-full border border-slate-200 outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition disabled:bg-slate-100 disabled:text-slate-400"
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSend();
-                  }
-                }}
-                placeholder={
-                  other ? 'Type a message and press Enter…' : 'Choose someone first'
-                }
-                disabled={!other}
+                className="flex-1 py-3 px-4 rounded-full bg-zinc-100 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 border border-transparent outline-none transition text-sm"
+                placeholder="Type a message..."
+                value={inputText} onChange={e => setInputText(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleSend())}
               />
-              <button
-                onClick={handleSend}
-                disabled={!other}
-                className="px-4 py-2 text-sm font-medium rounded-full bg-blue-600 text-white shadow-sm shadow-blue-500/30 hover:bg-blue-700 active:bg-blue-800 active:shadow-none disabled:bg-slate-300 disabled:text-slate-600 disabled:shadow-none disabled:cursor-not-allowed transition"
-              >
-                Send
+              <button onClick={handleSend} disabled={!inputText.trim()} className="p-3 rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition disabled:opacity-50">
+                <Send size={18} className={inputText.trim() ? "translate-x-0.5" : ""} />
               </button>
             </div>
-
-            {status && (
-              <div className="mt-1 text-[11px] text-red-500 text-center">
-                {status}
-              </div>
-            )}
-          </footer>
-        </main>
-      </div>
+          </div>
+        )}
+      </main>
     </div>
   );
 }
