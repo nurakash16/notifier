@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useState, useRef, useMemo } from 'react';
+import { useEffect, useState, useRef, useMemo, Suspense } from 'react'; // Added Suspense
 import Link from 'next/link';
+import { useRouter, useSearchParams, usePathname } from 'next/navigation'; // 🔥 NEW IMPORTS
 import { 
   Send, LogOut, MessageSquare, Search, 
-  ChevronLeft, X, Radio, ArrowLeft 
+  ChevronLeft, X, Radio 
 } from 'lucide-react';
 
 // 🔥 Firestore imports
@@ -41,7 +42,6 @@ const Avatar = ({ name, size = "md", className = "" }) => {
     md: "w-10 h-10 text-xs",
   };
   
-  // Generate consistent pastel color based on name
   const colors = [
     'bg-blue-100 text-blue-600',
     'bg-indigo-100 text-indigo-600',
@@ -75,9 +75,14 @@ function parseReplyBody(rawBody) {
   return { isReply: false, mainText: rawBody };
 }
 
-// --- MAIN CHAT COMPONENT ---
+// --- MAIN CHAT CONTENT ---
 
-export default function ChatPage() {
+function ChatContent() {
+  // 🔥 Navigation Hooks
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+
   // Auth State
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -88,7 +93,9 @@ export default function ChatPage() {
 
   // App State
   const [conversations, setConversations] = useState([]);
-  const [activeChat, setActiveChat] = useState(null); 
+  // REMOVED useState for activeChat, getting it from URL instead:
+  const activeChat = searchParams.get('chat'); 
+  
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
   const [replyTo, setReplyTo] = useState(null);
@@ -97,6 +104,18 @@ export default function ChatPage() {
 
   // Refs
   const scrollRef = useRef(null);
+
+  // 🔥 Helper to set URL param instead of local state
+  const handleSetActiveChat = (name) => {
+    const params = new URLSearchParams(searchParams);
+    if (name) {
+      params.set('chat', name);
+    } else {
+      params.delete('chat');
+    }
+    // Update URL without refreshing page
+    router.push(`${pathname}?${params.toString()}`);
+  };
 
   // 1. Check LocalStorage
   useEffect(() => {
@@ -184,7 +203,7 @@ export default function ChatPage() {
 
   const handleLogout = () => {
     setIsLoggedIn(false);
-    setActiveChat(null);
+    handleSetActiveChat(null); // Clear the URL param
     window.localStorage.removeItem('notifierWebAuth');
   };
 
@@ -253,13 +272,13 @@ export default function ChatPage() {
           <form onSubmit={handleAuth} className="space-y-4">
              <input 
                value={username} onChange={e => setUsername(e.target.value)}
-               className="w-full px-4 py-3 rounded-xl bg-zinc-100 border-transparent focus:bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
+               className="w-full px-4 py-3 rounded-xl bg-zinc-100 border-transparent focus:bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition text-base md:text-sm"
                placeholder="Username"
              />
              <input 
                type="password"
                value={password} onChange={e => setPassword(e.target.value)}
-               className="w-full px-4 py-3 rounded-xl bg-zinc-100 border-transparent focus:bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition"
+               className="w-full px-4 py-3 rounded-xl bg-zinc-100 border-transparent focus:bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition text-base md:text-sm"
                placeholder="Password"
              />
              <button disabled={loadingAuth} className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-semibold shadow-lg shadow-indigo-200 transition">
@@ -279,14 +298,15 @@ export default function ChatPage() {
 
   // --- MAIN CHAT UI ---
   return (
-    <div className="flex h-[100dvh] bg-zinc-50 overflow-hidden font-sans">
+    <div className="relative flex w-full h-[100dvh] bg-zinc-50 overflow-hidden font-sans">
       
       {/* SIDEBAR */}
       <aside className={`
-        flex flex-col bg-white border-r border-zinc-200 w-full md:w-80 lg:w-96
-        fixed inset-y-0 z-30 transition-transform duration-300
-        ${activeChat ? '-translate-x-full md:translate-x-0' : 'translate-x-0'} 
-        md:relative
+        absolute inset-0 md:relative z-20
+        flex flex-col bg-white border-r border-zinc-200 
+        w-full md:w-80 lg:w-96
+        transform transition-transform duration-300 ease-in-out
+        ${activeChat ? '-translate-x-full md:translate-x-0' : 'translate-x-0'}
       `}>
         {/* Sidebar Header */}
         <div className="h-16 px-4 border-b border-zinc-100 flex items-center justify-between shrink-0">
@@ -302,29 +322,28 @@ export default function ChatPage() {
           </button>
         </div>
 
-        {/* Search */}
+        {/* Search & Actions */}
         <div className="p-4 shrink-0 space-y-3">
           <div className="relative">
             <Search className="absolute left-3 top-2.5 text-zinc-400" size={16} />
             <input 
               value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
               placeholder="Search..."
-              className="w-full pl-9 pr-4 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:bg-white focus:border-indigo-400 outline-none transition"
+              className="w-full pl-9 pr-4 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-base md:text-sm focus:bg-white focus:border-indigo-400 outline-none transition"
             />
           </div>
-          {/* BroadCast Page Button (Mobile Sidebar) */}
           <Link href="/" className="flex items-center justify-center gap-2 w-full py-2 bg-indigo-50 text-indigo-600 text-xs font-medium rounded-xl hover:bg-indigo-100 transition md:hidden">
             <Radio size={14} /> Go to Broadcast
           </Link>
         </div>
 
-        {/* List */}
-        <div className="flex-1 overflow-y-auto px-2 space-y-1">
+        {/* Conversation List */}
+        <div className="flex-1 overflow-y-auto px-2 space-y-1 pb-4">
           {filteredConversations.map(c => (
             <button
               key={c.other}
-              onClick={() => setActiveChat(c.other)}
-              className={`w-full p-3 rounded-xl flex items-center gap-3 transition-all ${activeChat === c.other ? 'bg-indigo-600 shadow-md shadow-indigo-200' : 'hover:bg-zinc-50'}`}
+              onClick={() => handleSetActiveChat(c.other)}
+              className={`w-full p-3 rounded-xl flex items-center gap-3 transition-all ${activeChat === c.other ? 'bg-indigo-600 shadow-md shadow-indigo-200' : 'hover:bg-zinc-50 active:bg-zinc-100'}`}
             >
               <Avatar name={c.other} className={activeChat === c.other ? 'bg-white text-indigo-700' : ''} />
               <div className="flex-1 text-left min-w-0">
@@ -338,30 +357,32 @@ export default function ChatPage() {
 
       {/* CHAT AREA */}
       <main className={`
-        flex-1 flex flex-col bg-slate-50 h-full relative z-10 
-        transition-transform duration-300 absolute inset-0 md:static md:translate-x-0
+        absolute inset-0 md:static z-30
+        flex-1 flex flex-col bg-slate-50 w-full h-full
+        transform transition-transform duration-300 ease-in-out
         ${activeChat ? 'translate-x-0' : 'translate-x-full md:translate-x-0'}
       `}>
         
         {/* Chat Header */}
-        <header className="h-16 px-4 bg-white/90 backdrop-blur border-b border-zinc-200 flex items-center justify-between shrink-0 shadow-sm z-20">
+        <header className="h-16 px-3 md:px-4 bg-white/90 backdrop-blur border-b border-zinc-200 flex items-center justify-between shrink-0 shadow-sm z-40">
           <div className="flex items-center gap-2">
-            <button onClick={() => setActiveChat(null)} className="md:hidden p-2 -ml-2 text-zinc-600 hover:bg-slate-200 rounded-full">
+            <button 
+              onClick={() => handleSetActiveChat(null)} 
+              className="md:hidden p-2 -ml-2 text-zinc-600 hover:bg-slate-100 rounded-full active:scale-95 transition"
+            >
               <ChevronLeft size={24} />
             </button>
             {activeChat ? (
               <div className="flex items-center gap-3">
                 <Avatar name={activeChat} size="sm" />
-                <span className="font-bold text-zinc-800 text-sm">{activeChat}</span>
+                <span className="font-bold text-zinc-800 text-sm truncate max-w-[150px] md:max-w-xs">{activeChat}</span>
               </div>
-            ) : <span className="text-zinc-400 text-sm">Select a chat</span>}
+            ) : <span className="text-zinc-400 text-sm hidden md:block">Select a chat</span>}
           </div>
 
-          {/* 🔥 RIGHT SIDE HEADER ICONS */}
           <div className="flex items-center gap-2">
              <Link 
                href="/" 
-               title="Go to Broadcast Page"
                className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-indigo-50 text-indigo-600 rounded-full text-xs font-semibold hover:bg-indigo-100 transition"
              >
                <Radio size={14} /> Broadcast
@@ -372,7 +393,7 @@ export default function ChatPage() {
         {/* Messages */}
         <div 
           ref={scrollRef}
-          className="flex-1 overflow-y-auto p-4 space-y-1 bg-[#f0f4f8]"
+          className="flex-1 overflow-y-auto p-3 md:p-4 space-y-1 bg-[#f0f4f8]"
           style={{ backgroundImage: 'radial-gradient(#cbd5e1 1px, transparent 1px)', backgroundSize: '24px 24px' }}
         >
           {activeChat && groupedMessages.map((item) => {
@@ -389,19 +410,17 @@ export default function ChatPage() {
               <div key={item.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'} mb-1`}>
                 <div className={`flex max-w-[85%] md:max-w-[70%] items-end gap-2`}>
                   
-                  {/* Left Avatar (Other) */}
                   {!isMe && (
                     <div className="w-8 shrink-0">
                       {isLastInSequence && <Avatar name={data.from} size="sm" className="w-8 h-8 text-[10px]" />}
                     </div>
                   )}
 
-                  {/* Bubble */}
                   <div className={`flex flex-col min-w-0 ${isMe ? 'items-end' : 'items-start'}`}>
                     <div 
                       onClick={() => setReplyTo(data)}
                       className={`
-                        relative px-4 py-2 text-sm shadow-sm cursor-pointer transition-transform active:scale-[0.98]
+                        relative px-3 py-2 md:px-4 text-sm shadow-sm cursor-pointer transition-transform active:scale-[0.98]
                         whitespace-pre-wrap break-words
                         ${isMe 
                           ? `bg-indigo-500 text-white rounded-2xl ${isLastInSequence ? 'rounded-br-sm' : ''}` 
@@ -422,7 +441,6 @@ export default function ChatPage() {
                     </div>
                   </div>
 
-                  {/* Right Avatar (Me) */}
                   {isMe && (
                     <div className="w-8 shrink-0">
                       {isLastInSequence && <Avatar name={username} size="sm" className="w-8 h-8 text-[10px]" />}
@@ -437,9 +455,9 @@ export default function ChatPage() {
 
         {/* Input */}
         {activeChat && (
-          <div className="bg-white px-4 py-3 border-t border-zinc-200 shrink-0">
+          <div className="bg-white px-2 py-2 md:px-4 md:py-3 border-t border-zinc-200 shrink-0 safe-area-bottom">
             {replyTo && (
-              <div className="flex items-center justify-between bg-indigo-50 p-2 mb-2 rounded-lg border border-indigo-100">
+              <div className="flex items-center justify-between bg-indigo-50 p-2 mb-2 rounded-lg border border-indigo-100 mx-1 md:mx-0">
                 <div className="text-xs text-indigo-800 truncate px-2 border-l-2 border-indigo-500">
                   Replying to <span className="font-bold">{replyTo.from}</span>
                 </div>
@@ -448,12 +466,12 @@ export default function ChatPage() {
             )}
             <div className="flex items-end gap-2 max-w-4xl mx-auto">
               <input
-                className="flex-1 py-3 px-4 rounded-full bg-zinc-100 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 border border-transparent outline-none transition text-sm"
+                className="flex-1 py-3 px-4 rounded-full bg-zinc-100 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 border border-transparent outline-none transition text-base md:text-sm"
                 placeholder="Type a message..."
                 value={inputText} onChange={e => setInputText(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleSend())}
               />
-              <button onClick={handleSend} disabled={!inputText.trim()} className="p-3 rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition disabled:opacity-50">
+              <button onClick={handleSend} disabled={!inputText.trim()} className="p-3 rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition disabled:opacity-50">
                 <Send size={18} className={inputText.trim() ? "translate-x-0.5" : ""} />
               </button>
             </div>
@@ -461,5 +479,14 @@ export default function ChatPage() {
         )}
       </main>
     </div>
+  );
+}
+
+// 🔥 Wrapper to ensure useSearchParams works correctly in production
+export default function ChatPage() {
+  return (
+    <Suspense fallback={<div className="p-10 text-center text-zinc-500">Loading...</div>}>
+      <ChatContent />
+    </Suspense>
   );
 }
