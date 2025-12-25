@@ -41,8 +41,8 @@ export async function GET(req) {
     }
 
     // limit: default 30, max 100
-    let limit = limitStr ? Number(limitStr) : 30;
-    if (!Number.isFinite(limit) || limit <= 0) limit = 30;
+    let limit = limitStr ? Number(limitStr) : 100;
+    if (!Number.isFinite(limit) || limit <= 0) limit = 100;
     if (limit > 100) limit = 100;
 
     // newest first, then we'll reverse to oldest-first
