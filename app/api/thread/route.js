@@ -41,9 +41,9 @@ export async function GET(req) {
     }
 
     // limit: default 30, max 100
-    let limit = limitStr ? Number(limitStr) : 100;
-    if (!Number.isFinite(limit) || limit <= 0) limit = 100;
-    if (limit > 100) limit = 100;
+    let limit = limitStr ? Number(limitStr) : 200;
+    if (!Number.isFinite(limit) || limit <= 0) limit = 200;
+    if (limit > 200) limit = 200;
 
     // newest first, then we'll reverse to oldest-first
     query = query.orderBy('ts', 'desc').limit(limit);

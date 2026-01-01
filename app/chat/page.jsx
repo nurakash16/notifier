@@ -157,7 +157,7 @@ function ChatContent() {
       collection(db, 'messages'),
       where('participants', '==', participantsKey),
       orderBy('ts', 'asc'),
-      limitToLast(50)
+      limitToLast(200)
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -408,7 +408,7 @@ function ChatContent() {
 
             return (
               <div key={item.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'} mb-1`}>
-                <div className={`flex max-w-[85%] md:max-w-[70%] items-end gap-2`}>
+                <div className={`flex max-w-[85%] md:max-w-[70%] min-w-0 items-end gap-2`}>
                   
                   {!isMe && (
                     <div className="w-8 shrink-0">
@@ -420,7 +420,7 @@ function ChatContent() {
                     <div 
                       onClick={() => setReplyTo(data)}
                       className={`
-                        relative px-3 py-2 md:px-4 text-sm shadow-sm cursor-pointer transition-transform active:scale-[0.98]
+                        relative px-3 py-2 md:px-4 text-sm shadow-sm cursor-pointer transition-transform active:scale-[0.98] min-w-0 max-w-full
                         whitespace-pre-wrap break-words
                         ${isMe 
                           ? `bg-indigo-500 text-white rounded-2xl ${isLastInSequence ? 'rounded-br-sm' : ''}` 
@@ -429,9 +429,9 @@ function ChatContent() {
                       `}
                     >
                       {isReply && (
-                        <div className={`mb-2 rounded-lg p-2 text-xs border-l-4 overflow-hidden ${isMe ? 'bg-black/20 border-indigo-200 text-indigo-50' : 'bg-zinc-100 border-indigo-500 text-zinc-600'}`}>
+                        <div className={`mb-2 w-full max-w-full rounded-lg p-2 text-xs border-l-4 overflow-hidden ${isMe ? 'bg-black/20 border-indigo-200 text-indigo-50' : 'bg-zinc-100 border-indigo-500 text-zinc-600'}`}>
                           <div className="font-bold mb-0.5 opacity-90">{replyAuthor}</div>
-                          <div className="truncate opacity-80">{replySnippet}</div>
+                          <div className="opacity-80 break-words whitespace-normal">{replySnippet}</div>
                         </div>
                       )}
                       {mainText}

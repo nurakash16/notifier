@@ -33,7 +33,7 @@ export async function GET(req) {
       .collection('conversations')
       .where('participantsArr', 'array-contains', username)
       .orderBy('lastTs', 'desc')
-      .limit(100) // max 50 conversations
+      .limit(200) // max 50 conversations
       .get();
 
     const conversations = qSnap.docs.map((doc) => {
