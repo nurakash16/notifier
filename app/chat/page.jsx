@@ -11,7 +11,8 @@ import {
 // 🔥 Firestore imports
 import { db } from '../../lib/firebaseClient'; 
 import {
-  collection, query, where, orderBy, limitToLast, onSnapshot
+  collection, query, where, orderBy, limitToLast, onSnapshot,
+  doc, setDoc, getDoc
 } from 'firebase/firestore';
 
 // --- UTILITIES ---
@@ -36,7 +37,7 @@ const getDateLabel = (ts) => {
 
 // --- COMPONENTS ---
 
-const Avatar = ({ name, size = "md", className = "" }) => {
+const Avatar = ({ name, size = "md", className = "", src }) => {
   const sizeClasses = {
     sm: "w-8 h-8 text-[10px]",
     md: "w-10 h-10 text-xs",
@@ -54,7 +55,11 @@ const Avatar = ({ name, size = "md", className = "" }) => {
 
   return (
     <div className={`${sizeClasses[size]} ${colors[colorIndex]} ${className} flex items-center justify-center rounded-full font-bold border-2 border-white shadow-sm shrink-0`}>
-      {getInitials(name)}
+      {src ? (
+        <img src={src} alt={name ? `${name} avatar` : 'User avatar'} className="h-full w-full rounded-full object-cover" />
+      ) : (
+        getInitials(name)
+      )}
     </div>
   );
 };
@@ -75,14 +80,42 @@ function parseReplyBody(rawBody) {
   return { isReply: false, mainText: rawBody };
 }
 
-function getReplySnippet(msg) {
+function getReplySnippet(msg, decrypted) {
   if (!msg) return '';
-  if (msg.type === 'image' || msg.image?.dataUrl || msg.image?.url) {
-    return msg.body ? msg.body : '[Image]';
+  const text = decrypted?.text || msg.body || '';
+  const image = decrypted?.image || msg.image;
+  if (msg.type === 'image' || image?.url || image?.dataUrl) {
+    return text ? text : '[Image]';
   }
-  const parsed = parseReplyBody(msg.body || '');
-  return parsed.mainText || msg.body || '';
+  const parsed = parseReplyBody(text);
+  return parsed.mainText || text || '';
 }
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+const bytesToBase64 = (bytes) => btoa(String.fromCharCode(...bytes));
+const base64ToBytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+
+const formatLastSeen = (ts) => {
+  if (!ts) return 'Last seen unknown';
+  const diffMs = Date.now() - ts;
+  if (diffMs < 60 * 1000) return 'Last seen just now';
+  const mins = Math.floor(diffMs / (60 * 1000));
+  if (mins < 60) return `Last seen ${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `Last seen ${hours}h ago`;
+  const date = new Date(ts);
+  return `Last seen ${date.toLocaleDateString()}`;
+};
+
+const getPreviewText = (payload, fallbackText) => {
+  const text = payload?.text || fallbackText || '';
+  if (payload?.image) {
+    return text ? `Image: ${text}` : '[Image]';
+  }
+  return text || '';
+};
 
 // --- MAIN CHAT CONTENT ---
 
@@ -111,9 +144,21 @@ function ChatContent() {
   const [status, setStatus] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [imageDraft, setImageDraft] = useState(null);
+  const [cryptoReady, setCryptoReady] = useState(false);
+  const [publicKeyJwk, setPublicKeyJwk] = useState(null);
+  const [decryptedById, setDecryptedById] = useState({});
+  const [activeChatLastSeen, setActiveChatLastSeen] = useState(null);
+  const [userProfiles, setUserProfiles] = useState({});
+  const [reactionPickerId, setReactionPickerId] = useState(null);
+  const [recipientKeyMissing, setRecipientKeyMissing] = useState(false);
 
   // Refs
   const scrollRef = useRef(null);
+  const privateKeyRef = useRef(null);
+  const publicKeyCacheRef = useRef(new Map());
+  const decryptedRef = useRef({});
+  const longPressTimerRef = useRef(null);
+  const longPressTriggeredRef = useRef(false);
 
   // 🔥 Helper to set URL param instead of local state
   const handleSetActiveChat = (name) => {
@@ -143,6 +188,67 @@ function ChatContent() {
     } catch {}
   }, []);
 
+  useEffect(() => {
+    decryptedRef.current = decryptedById;
+  }, [decryptedById]);
+
+  // 1.5 Setup E2E keys
+  useEffect(() => {
+    if (!isLoggedIn || !username || typeof window === 'undefined') return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const storageKey = `notifierWebKeys_${username}`;
+        const saved = window.localStorage.getItem(storageKey);
+        let privateJwk;
+        let publicJwk;
+
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          privateJwk = parsed?.privateJwk;
+          publicJwk = parsed?.publicJwk;
+        }
+
+        if (!privateJwk || !publicJwk) {
+          const keyPair = await crypto.subtle.generateKey(
+            { name: 'ECDH', namedCurve: 'P-256' },
+            true,
+            ['deriveKey']
+          );
+          privateJwk = await crypto.subtle.exportKey('jwk', keyPair.privateKey);
+          publicJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+          window.localStorage.setItem(storageKey, JSON.stringify({ privateJwk, publicJwk }));
+        }
+
+        const privateKey = await crypto.subtle.importKey(
+          'jwk',
+          privateJwk,
+          { name: 'ECDH', namedCurve: 'P-256' },
+          true,
+          ['deriveKey']
+        );
+        if (cancelled) return;
+        privateKeyRef.current = privateKey;
+        setPublicKeyJwk(publicJwk);
+        setCryptoReady(true);
+
+        await setDoc(
+          doc(db, 'users', username),
+          { publicKeyJwk: publicJwk, lastSeen: Date.now() },
+          { merge: true }
+        );
+      } catch (err) {
+        console.error('crypto setup failed', err);
+        setStatus('Encryption setup failed');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isLoggedIn, username]);
+
   // 2. Load Conversations
   useEffect(() => {
     if (!isLoggedIn) return;
@@ -161,6 +267,8 @@ function ChatContent() {
     if (!isLoggedIn || !activeChat || !username) return;
 
     setMessages([]); 
+    setDecryptedById({});
+    decryptedRef.current = {};
     const participantsKey = [username, activeChat].sort().join('_');
     
     const q = query(
@@ -178,12 +286,221 @@ function ChatContent() {
     return () => unsubscribe();
   }, [isLoggedIn, username, activeChat]);
 
+  // 3.1 Last seen updates for current user
+  useEffect(() => {
+    if (!isLoggedIn || !username) return;
+    const userRef = doc(db, 'users', username);
+
+    const updateLastSeen = async () => {
+      try {
+        await setDoc(userRef, { lastSeen: Date.now() }, { merge: true });
+      } catch (err) {
+        console.error('last seen update failed', err);
+      }
+    };
+
+    updateLastSeen();
+    const intervalId = setInterval(updateLastSeen, 30000);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        updateLastSeen();
+      }
+    };
+
+    window.addEventListener('beforeunload', updateLastSeen);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      clearInterval(intervalId);
+      window.removeEventListener('beforeunload', updateLastSeen);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      updateLastSeen();
+    };
+  }, [isLoggedIn, username]);
+
+  // 3.2 Track active chat last seen
+  useEffect(() => {
+    if (!activeChat) {
+      setActiveChatLastSeen(null);
+      setRecipientKeyMissing(false);
+      return;
+    }
+
+    const unsub = onSnapshot(doc(db, 'users', activeChat), (snap) => {
+      const data = snap.data();
+      setActiveChatLastSeen(data?.lastSeen || null);
+      if (data?.avatarUrl) {
+        setUserProfiles((prev) => ({
+          ...prev,
+          [activeChat]: { ...(prev[activeChat] || {}), avatarUrl: data.avatarUrl },
+        }));
+      }
+    });
+
+    return () => unsub();
+  }, [activeChat]);
+
+  useEffect(() => {
+    if (!conversations.length && !activeChat && !username) return;
+    let cancelled = false;
+    const names = new Set([username, activeChat, ...conversations.map((c) => c.other)].filter(Boolean));
+    const fetchMissing = async () => {
+      const updates = {};
+      for (const name of names) {
+        if (userProfiles[name]) continue;
+        try {
+          const snap = await getDoc(doc(db, 'users', name));
+          const data = snap.data();
+          if (data?.avatarUrl) {
+            updates[name] = { avatarUrl: data.avatarUrl };
+          }
+        } catch (err) {
+          console.error('profile fetch failed', err);
+        }
+      }
+      if (!cancelled && Object.keys(updates).length) {
+        setUserProfiles((prev) => ({ ...prev, ...updates }));
+      }
+    };
+
+    fetchMissing();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [conversations, activeChat, username, userProfiles]);
+
   // 4. Auto-scroll
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
     }
   }, [messages, replyTo]);
+
+  const getUserPublicKeyJwk = async (name) => {
+    const cache = publicKeyCacheRef.current;
+    if (cache.has(name)) return cache.get(name);
+    const snap = await getDoc(doc(db, 'users', name));
+    const data = snap.data();
+    if (!data?.publicKeyJwk) {
+      setRecipientKeyMissing(true);
+      throw new Error('Recipient has no public key');
+    }
+    cache.set(name, data.publicKeyJwk);
+    setRecipientKeyMissing(false);
+    return data.publicKeyJwk;
+  };
+
+  const importPublicKey = async (jwk) => (
+    crypto.subtle.importKey('jwk', jwk, { name: 'ECDH', namedCurve: 'P-256' }, true, [])
+  );
+
+  const encryptPayloadFor = async (recipient, payload) => {
+    if (!privateKeyRef.current || !publicKeyJwk) {
+      throw new Error('Encryption not ready');
+    }
+    const recipientJwk = await getUserPublicKeyJwk(recipient);
+    const recipientKey = await importPublicKey(recipientJwk);
+    const aesKey = await crypto.subtle.deriveKey(
+      { name: 'ECDH', public: recipientKey },
+      privateKeyRef.current,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt']
+    );
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encoded = textEncoder.encode(JSON.stringify(payload));
+    const cipherBuffer = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, encoded);
+    return {
+      ciphertext: bytesToBase64(new Uint8Array(cipherBuffer)),
+      iv: bytesToBase64(iv),
+      senderPubKeyJwk: JSON.stringify(publicKeyJwk),
+    };
+  };
+
+  const decryptPayload = async (msg) => {
+    if (!privateKeyRef.current || !msg?.encrypted) return null;
+    const encrypted = msg.encrypted;
+    if (!encrypted.ciphertext || !encrypted.iv) return null;
+
+    let publicJwk;
+    if (msg.from === username) {
+      publicJwk = await getUserPublicKeyJwk(msg.to);
+    } else {
+      publicJwk = JSON.parse(encrypted.senderPubKeyJwk || '{}');
+    }
+    if (!publicJwk || !publicJwk.kty) return null;
+
+    const senderKey = await importPublicKey(publicJwk);
+    const aesKey = await crypto.subtle.deriveKey(
+      { name: 'ECDH', public: senderKey },
+      privateKeyRef.current,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['decrypt']
+    );
+    const iv = base64ToBytes(encrypted.iv);
+    const cipherBytes = base64ToBytes(encrypted.ciphertext);
+    const plainBuffer = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, cipherBytes);
+    const decoded = textDecoder.decode(plainBuffer);
+    return JSON.parse(decoded);
+  };
+
+  useEffect(() => {
+    if (!cryptoReady || !messages.length) return;
+    let cancelled = false;
+
+    const decryptMissing = async () => {
+      const pending = messages.filter((msg) => msg.encrypted && !decryptedRef.current[msg.id]);
+      if (!pending.length) return;
+      const results = await Promise.all(
+        pending.map(async (msg) => {
+          try {
+            const payload = await decryptPayload(msg);
+            return payload ? { id: msg.id, payload } : null;
+          } catch (err) {
+            console.error('decrypt failed', err);
+            return null;
+          }
+        })
+      );
+      if (cancelled) return;
+      setDecryptedById((prev) => {
+        const next = { ...prev };
+        results.forEach((entry) => {
+          if (entry) next[entry.id] = entry.payload;
+        });
+        return next;
+      });
+    };
+
+    decryptMissing();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [cryptoReady, messages, username, activeChat]);
+
+  useEffect(() => {
+    if (!activeChat || !messages.length) return;
+    const lastMsg = messages[messages.length - 1];
+    const payload = lastMsg.encrypted ? decryptedById[lastMsg.id] : null;
+    const preview = lastMsg.encrypted
+      ? (payload ? getPreviewText(payload, '') : '[Encrypted]')
+      : getPreviewText(null, lastMsg.body || '');
+    const lastTs = lastMsg.ts || Date.now();
+
+    setConversations((prev) => {
+      const existing = prev.find((c) => c.other === activeChat);
+      if (!existing) {
+        return [{ other: activeChat, lastBody: preview, lastTs }, ...prev];
+      }
+      return prev.map((c) => (
+        c.other === activeChat ? { ...c, lastBody: preview, lastTs } : c
+      ));
+    });
+  }, [messages, decryptedById, activeChat]);
 
   // --- HANDLERS ---
 
@@ -215,30 +532,68 @@ function ChatContent() {
     setIsLoggedIn(false);
     handleSetActiveChat(null); // Clear the URL param
     window.localStorage.removeItem('notifierWebAuth');
+    setCryptoReady(false);
+    setPublicKeyJwk(null);
+    privateKeyRef.current = null;
+    publicKeyCacheRef.current = new Map();
+    setDecryptedById({});
+    setActiveChatLastSeen(null);
   };
 
   const handleSend = async () => {
     if (!activeChat || (!inputText.trim() && !imageDraft)) return;
+    if (!cryptoReady) {
+      setStatus('Encryption not ready');
+      return;
+    }
+    setStatus('');
     
     const rawText = inputText.trim();
     let body = rawText;
 
     if (replyTo) {
-      const cleanSnippet = getReplySnippet(replyTo).replace(/\s+/g, ' ').slice(0, 60);
+      const replyPayload = decryptedById[replyTo.id];
+      const replySnippet = getReplySnippet(replyTo, replyPayload);
+      const cleanSnippet = replySnippet.replace(/\s+/g, ' ').slice(0, 60);
       body = `↪ ${replyTo.from}: ${cleanSnippet}\n\n${rawText}`;
     }
 
+    const payload = {
+      text: body,
+      image: imageDraft ? { url: imageDraft.url, width: imageDraft.width, height: imageDraft.height } : null,
+    };
+
     const tempId = 'local-' + Date.now();
+    let encrypted;
+    try {
+      encrypted = await encryptPayloadFor(activeChat, payload);
+    } catch (err) {
+      console.error(err);
+      setStatus('Encryption failed');
+      return;
+    }
     const newMsg = {
       id: tempId,
       from: username,
       to: activeChat,
-      body,
+      body: '',
       ts: Date.now(),
-      type: imageDraft ? 'image' : 'text',
-      image: imageDraft ? { url: imageDraft.url, width: imageDraft.width, height: imageDraft.height } : null,
+      type: 'encrypted',
+      encrypted,
     };
     setMessages(prev => [...prev, newMsg]);
+    setDecryptedById((prev) => ({ ...prev, [tempId]: payload }));
+    setConversations((prev) => {
+      const preview = getPreviewText(payload, '');
+      const lastTs = newMsg.ts;
+      const existing = prev.find((c) => c.other === activeChat);
+      if (!existing) {
+        return [{ other: activeChat, lastBody: preview, lastTs }, ...prev];
+      }
+      return prev.map((c) => (
+        c.other === activeChat ? { ...c, lastBody: preview, lastTs } : c
+      ));
+    });
     setInputText('');
     setReplyTo(null);
     setImageDraft(null);
@@ -251,9 +606,8 @@ function ChatContent() {
           username,
           password,
           to: activeChat,
-          body,
-          type: imageDraft ? 'image' : 'text',
-          image: imageDraft ? { url: imageDraft.url, width: imageDraft.width, height: imageDraft.height } : null,
+          body: '',
+          encrypted,
         }),
       });
     } catch (e) { console.error(e); }
@@ -271,15 +625,7 @@ function ChatContent() {
     return new Blob([bytes], { type: contentType });
   };
 
-  const handleImageSelect = async (e) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-    if (!file.type.startsWith('image/')) {
-      setStatus('Please select an image file');
-      return;
-    }
-
+  const compressImageFile = async (file, maxSize, quality) => {
     const dataUrl = await new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result);
@@ -294,7 +640,6 @@ function ChatContent() {
       image.src = dataUrl;
     });
 
-    const maxSize = 1280;
     let { width, height } = img;
     if (width > maxSize || height > maxSize) {
       const ratio = Math.min(maxSize / width, maxSize / height);
@@ -307,23 +652,36 @@ function ChatContent() {
     canvas.height = height;
     const ctx = canvas.getContext('2d');
     if (!ctx) {
-      setStatus('Image processing failed');
-      return;
+      throw new Error('Image processing failed');
     }
     ctx.drawImage(img, 0, 0, width, height);
 
-    const compressed = canvas.toDataURL('image/jpeg', 0.7);
-    if (compressed.length > 900000) {
-      setStatus('Image is too large after compression');
+    const compressed = canvas.toDataURL('image/jpeg', quality);
+    return { compressed, width, height };
+  };
+
+  const handleImageSelect = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setStatus('Please select an image file');
       return;
     }
 
-    setStatus('Uploading image...');
-    const blob = dataUrlToBlob(compressed);
-    const uploadForm = new FormData();
-    uploadForm.append('file', blob, 'upload.jpg');
-
     try {
+      const { compressed, width, height } = await compressImageFile(file, 1280, 0.7);
+      if (compressed.length > 900000) {
+        setStatus('Image is too large after compression');
+        return;
+      }
+
+      setStatus('Uploading image...');
+      const blob = dataUrlToBlob(compressed);
+      const uploadForm = new FormData();
+      uploadForm.append('file', blob, 'upload.jpg');
+      uploadForm.append('folder', 'chat-images');
+
       const res = await fetch('/api/upload', { method: 'POST', body: uploadForm });
       const data = await res.json();
       if (!res.ok || !data.ok || !data.url) {
@@ -340,6 +698,99 @@ function ChatContent() {
       console.error(err);
       setStatus('Image upload failed');
     }
+  };
+
+  const handleAvatarSelect = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setStatus('Please select an image file');
+      return;
+    }
+
+    try {
+      const { compressed, width, height } = await compressImageFile(file, 512, 0.8);
+      if (compressed.length > 400000) {
+        setStatus('Avatar is too large after compression');
+        return;
+      }
+
+      setStatus('Uploading avatar...');
+      const blob = dataUrlToBlob(compressed);
+      const uploadForm = new FormData();
+      uploadForm.append('file', blob, 'avatar.jpg');
+      uploadForm.append('folder', 'avatars');
+      uploadForm.append('publicId', `avatar_${username}`);
+      uploadForm.append('overwrite', 'true');
+
+      const res = await fetch('/api/upload', { method: 'POST', body: uploadForm });
+      const data = await res.json();
+      if (!res.ok || !data.ok || !data.url) {
+        throw new Error(data.error || 'Upload failed');
+      }
+
+      await setDoc(
+        doc(db, 'users', username),
+        { avatarUrl: data.url, avatarUpdatedAt: Date.now() },
+        { merge: true }
+      );
+
+      setUserProfiles((prev) => ({
+        ...prev,
+        [username]: { ...(prev[username] || {}), avatarUrl: data.url },
+      }));
+      setStatus('');
+    } catch (err) {
+      console.error(err);
+      setStatus('Avatar upload failed');
+    }
+  };
+
+  const toggleReactionLocal = (messageId, emoji, actor) => {
+    setMessages((prev) => prev.map((msg) => {
+      if (msg.id !== messageId) return msg;
+      const reactions = { ...(msg.reactions || {}) };
+      const current = { ...((reactions[emoji] || {})) };
+      if (current[actor]) {
+        delete current[actor];
+      } else {
+        current[actor] = true;
+      }
+      if (Object.keys(current).length === 0) {
+        delete reactions[emoji];
+      } else {
+        reactions[emoji] = current;
+      }
+      return { ...msg, reactions };
+    }));
+  };
+
+  const handleReact = async (messageId, emoji) => {
+    if (!username) return;
+    toggleReactionLocal(messageId, emoji, username);
+    try {
+      await fetch('/api/react', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, messageId, emoji }),
+      });
+    } catch (err) {
+      console.error('react failed', err);
+    }
+  };
+
+  const startLongPress = (messageId) => {
+    clearTimeout(longPressTimerRef.current);
+    longPressTriggeredRef.current = false;
+    longPressTimerRef.current = setTimeout(() => {
+      longPressTriggeredRef.current = true;
+      setReactionPickerId(messageId);
+    }, 500);
+  };
+
+  const endLongPress = () => {
+    clearTimeout(longPressTimerRef.current);
   };
 
   const groupedMessages = useMemo(() => {
@@ -419,7 +870,13 @@ function ChatContent() {
         {/* Sidebar Header */}
         <div className="h-16 px-4 border-b border-zinc-100 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
-            <Avatar name={username} size="sm" />
+            <div className="relative">
+              <Avatar name={username} size="sm" src={userProfiles[username]?.avatarUrl} />
+              <label className="absolute -bottom-1 -right-1 rounded-full bg-white p-0.5 shadow cursor-pointer">
+                <input type="file" accept="image/*" onChange={handleAvatarSelect} className="hidden" />
+                <ImagePlus size={12} className="text-zinc-500" />
+              </label>
+            </div>
             <div>
               <div className="font-bold text-zinc-800 text-sm">{username}</div>
               <div className="text-[10px] text-green-600 flex items-center gap-1">● Online</div>
@@ -453,7 +910,7 @@ function ChatContent() {
               onClick={() => handleSetActiveChat(c.other)}
               className={`w-full p-3 rounded-xl flex items-center gap-3 transition-all ${activeChat === c.other ? 'bg-indigo-600 shadow-md shadow-indigo-200' : 'hover:bg-zinc-50 active:bg-zinc-100'}`}
             >
-              <Avatar name={c.other} className={activeChat === c.other ? 'bg-white text-indigo-700' : ''} />
+              <Avatar name={c.other} src={userProfiles[c.other]?.avatarUrl} className={activeChat === c.other ? 'bg-white text-indigo-700' : ''} />
               <div className="flex-1 text-left min-w-0">
                 <div className={`text-sm font-semibold truncate ${activeChat === c.other ? 'text-white' : 'text-zinc-800'}`}>{c.other}</div>
                 <div className={`text-xs truncate ${activeChat === c.other ? 'text-indigo-100' : 'text-zinc-500'}`}>{c.lastBody}</div>
@@ -482,8 +939,11 @@ function ChatContent() {
             </button>
             {activeChat ? (
               <div className="flex items-center gap-3">
-                <Avatar name={activeChat} size="sm" />
-                <span className="font-bold text-zinc-800 text-sm truncate max-w-[150px] md:max-w-xs">{activeChat}</span>
+                <Avatar name={activeChat} size="sm" src={userProfiles[activeChat]?.avatarUrl} />
+                <div className="flex flex-col min-w-0">
+                  <span className="font-bold text-zinc-800 text-sm truncate max-w-[150px] md:max-w-xs">{activeChat}</span>
+                  <span className="text-[10px] text-zinc-500">{formatLastSeen(activeChatLastSeen)}</span>
+                </div>
               </div>
             ) : <span className="text-zinc-400 text-sm hidden md:block">Select a chat</span>}
           </div>
@@ -512,9 +972,11 @@ function ChatContent() {
             );
             
             const { isMe, data, isLastInSequence } = item;
-            const imageUrl = data?.image?.url || data?.image?.dataUrl;
-            const isImageMessage = data?.type === 'image' || !!imageUrl;
-            const { isReply, replyAuthor, replySnippet, mainText } = parseReplyBody(data.body);
+            const decrypted = decryptedById[item.id];
+            const displayText = decrypted?.text || data.body || '';
+            const imageUrl = decrypted?.image?.url || data?.image?.url || data?.image?.dataUrl;
+            const isImageMessage = !!imageUrl;
+            const { isReply, replyAuthor, replySnippet, mainText } = parseReplyBody(displayText);
 
             return (
               <div key={item.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'} mb-1`}>
@@ -522,15 +984,25 @@ function ChatContent() {
                   
                   {!isMe && (
                     <div className="w-8 shrink-0">
-                      {isLastInSequence && <Avatar name={data.from} size="sm" className="w-8 h-8 text-[10px]" />}
+                      {isLastInSequence && <Avatar name={data.from} size="sm" src={userProfiles[data.from]?.avatarUrl} className="w-8 h-8 text-[10px]" />}
                     </div>
                   )}
 
                   <div className={`flex flex-col min-w-0 ${isMe ? 'items-end' : 'items-start'}`}>
                     <div 
-                      onClick={() => setReplyTo(data)}
+                      onClick={() => {
+                        if (longPressTriggeredRef.current) {
+                          longPressTriggeredRef.current = false;
+                          return;
+                        }
+                        setReplyTo(data);
+                        setReactionPickerId(null);
+                      }}
+                      onTouchStart={() => startLongPress(item.id)}
+                      onTouchEnd={endLongPress}
+                      onTouchCancel={endLongPress}
                       className={`
-                        relative px-3 py-2 md:px-4 text-sm shadow-sm cursor-pointer transition-transform active:scale-[0.98] min-w-0 max-w-full
+                        group relative px-3 py-2 md:px-4 text-sm shadow-sm cursor-pointer transition-transform active:scale-[0.98] min-w-0 max-w-full
                         whitespace-pre-wrap break-words
                         ${isMe 
                           ? `bg-indigo-500 text-white rounded-2xl ${isLastInSequence ? 'rounded-br-sm' : ''}` 
@@ -556,15 +1028,47 @@ function ChatContent() {
                           {mainText}
                         </div>
                       )}
+                      <div className={`mt-2 flex items-center gap-1 transition-opacity ${reactionPickerId === item.id ? 'opacity-100' : 'opacity-0'} group-hover:opacity-100 ${isMe ? 'justify-end' : 'justify-start'}`}>
+                        {['👍', '❤️', '😂', '🔥'].map((emoji) => (
+                          <button
+                            key={emoji}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleReact(item.id, emoji);
+                              setReactionPickerId(null);
+                            }}
+                            className={`text-xs px-2 py-0.5 rounded-full border ${isMe ? 'border-white/30 text-white/90' : 'border-zinc-200 text-zinc-600'} hover:scale-105 transition`}
+                          >
+                            {emoji}
+                          </button>
+                        ))}
+                      </div>
                       <div className={`text-[9px] mt-1 flex justify-end gap-1 ${isMe ? 'text-indigo-200' : 'text-zinc-400'}`}>
                         {formatTime(data.ts)} {isMe && '✓'}
                       </div>
                     </div>
+                    {!!data.reactions && Object.keys(data.reactions).length > 0 && (
+                      <div className={`mt-1 flex flex-wrap gap-1 ${isMe ? 'justify-end' : 'justify-start'}`}>
+                        {Object.entries(data.reactions).map(([emoji, users]) => {
+                          const count = Object.keys(users || {}).length;
+                          const reacted = !!users?.[username];
+                          return (
+                            <button
+                              key={emoji}
+                              onClick={(e) => { e.stopPropagation(); handleReact(item.id, emoji); }}
+                              className={`text-[10px] px-2 py-0.5 rounded-full border ${reacted ? 'bg-indigo-100 border-indigo-200 text-indigo-700' : 'bg-white border-zinc-200 text-zinc-600'} hover:scale-105 transition`}
+                            >
+                              {emoji} {count}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
 
                   {isMe && (
                     <div className="w-8 shrink-0">
-                      {isLastInSequence && <Avatar name={username} size="sm" className="w-8 h-8 text-[10px]" />}
+                      {isLastInSequence && <Avatar name={username} size="sm" src={userProfiles[username]?.avatarUrl} className="w-8 h-8 text-[10px]" />}
                     </div>
                   )}
 
@@ -583,6 +1087,11 @@ function ChatContent() {
                   Replying to <span className="font-bold">{replyTo.from}</span>
                 </div>
                 <button onClick={() => setReplyTo(null)} className="p-1 hover:bg-indigo-200 rounded-full text-indigo-600"><X size={14} /></button>
+              </div>
+            )}
+            {recipientKeyMissing && (
+              <div className="text-xs text-amber-600 mb-2 mx-1 md:mx-0">
+                This user has not set up encryption yet. Ask them to open the app once.
               </div>
             )}
             {status && (
@@ -615,8 +1124,9 @@ function ChatContent() {
                 placeholder="Type a message..."
                 value={inputText} onChange={e => setInputText(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleSend())}
+                disabled={recipientKeyMissing}
               />
-              <button onClick={handleSend} disabled={!inputText.trim() && !imageDraft} className="p-3 rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition disabled:opacity-50">
+              <button onClick={handleSend} disabled={recipientKeyMissing || !cryptoReady || (!inputText.trim() && !imageDraft)} className="p-3 rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition disabled:opacity-50">
                 <Send size={18} className={inputText.trim() ? "translate-x-0.5" : ""} />
               </button>
             </div>

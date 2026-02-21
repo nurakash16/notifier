@@ -4,13 +4,16 @@ import { db, messaging } from '../../../lib/firebaseAdmin';
 
 export async function POST(req) {
   try {
-    const { username, password, to, body, type, image } = await req.json();
+    const { username, password, to, body, encrypted } = await req.json();
 
+    const hasEncrypted =
+      encrypted &&
+      typeof encrypted.ciphertext === 'string' &&
+      typeof encrypted.iv === 'string' &&
+      typeof encrypted.senderPubKeyJwk === 'string';
     const hasText = typeof body === 'string' && body.trim().length > 0;
-    const hasImageUrl = image && typeof image.url === 'string' && image.url.startsWith('http');
-    const hasImage = hasImageUrl;
 
-    if (!username || !to || (!hasText && !hasImage)) {
+    if (!username || !to || (!hasEncrypted && !hasText)) {
       return NextResponse.json(
         { ok: false, error: 'missing fields' },
         { status: 400 }
@@ -46,20 +49,19 @@ export async function POST(req) {
     const participants = [username, to].sort().join('_'); // "alice_bob"
     const participantsArr = [username, to];
 
-    const imagePayload = hasImageUrl
-      ? {
-          url: image.url,
-          width: image.width || null,
-          height: image.height || null,
-        }
-      : null;
-
     const msgData = {
       from: username,
       to,
-      body: hasText ? body : '',
-      type: hasImage ? 'image' : 'text',
-      image: imagePayload,
+      body: hasEncrypted ? '' : (hasText ? body : ''),
+      type: hasEncrypted ? 'encrypted' : 'text',
+      encrypted: hasEncrypted
+        ? {
+            ciphertext: encrypted.ciphertext,
+            iv: encrypted.iv,
+            senderPubKeyJwk: encrypted.senderPubKeyJwk,
+            v: 1,
+          }
+        : null,
       ts: now,
       participants,
       participantsArr,
@@ -70,7 +72,7 @@ export async function POST(req) {
 
     // 4) Upsert conversation summary (1 doc per pair)
     const convRef = db.collection('conversations').doc(participants);
-    const lastBody = hasImage ? (hasText ? `Image: ${body}` : '[Image]') : body;
+    const lastBody = hasEncrypted ? '[Encrypted]' : body;
 
     await convRef.set(
       {

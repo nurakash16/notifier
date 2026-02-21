@@ -20,9 +20,17 @@ export async function POST(req) {
     }
     const formData = await req.formData();
     const file = formData.get('file');
+    const folderRaw = formData.get('folder');
+    const publicIdRaw = formData.get('publicId');
+    const overwriteRaw = formData.get('overwrite');
 
     if (!file) {
       return NextResponse.json({ ok: false, error: 'no file' }, { status: 400 });
+    }
+
+    const folder = typeof folderRaw === 'string' ? folderRaw : 'chat-images';
+    if (!['chat-images', 'avatars'].includes(folder)) {
+      return NextResponse.json({ ok: false, error: 'invalid folder' }, { status: 400 });
     }
 
     const arrayBuffer = await file.arrayBuffer();
@@ -30,9 +38,21 @@ export async function POST(req) {
     const contentType = file.type || 'image/jpeg';
     const dataUri = `data:${contentType};base64,${buffer.toString('base64')}`;
 
-    const result = await cloudinary.uploader.upload(dataUri, {
-      folder: 'chat-images',
+    const uploadOptions = {
+      folder,
       resource_type: 'image',
+    };
+
+    if (typeof publicIdRaw === 'string' && publicIdRaw.trim()) {
+      uploadOptions.public_id = publicIdRaw.trim();
+    }
+    if (overwriteRaw === 'true') {
+      uploadOptions.overwrite = true;
+      uploadOptions.invalidate = true;
+    }
+
+    const result = await cloudinary.uploader.upload(dataUri, {
+      ...uploadOptions,
     });
 
     return NextResponse.json({
