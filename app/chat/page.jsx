@@ -3,9 +3,9 @@
 import { useEffect, useState, useRef, useMemo, Suspense } from 'react'; // Added Suspense
 import Link from 'next/link';
 import { useRouter, useSearchParams, usePathname } from 'next/navigation'; // 🔥 NEW IMPORTS
-import { 
-  Send, LogOut, MessageSquare, Search, 
-  ChevronLeft, X, Radio 
+import {
+  Send, LogOut, MessageSquare, Search,
+  ChevronLeft, X, Radio, ImagePlus
 } from 'lucide-react';
 
 // 🔥 Firestore imports
@@ -75,6 +75,15 @@ function parseReplyBody(rawBody) {
   return { isReply: false, mainText: rawBody };
 }
 
+function getReplySnippet(msg) {
+  if (!msg) return '';
+  if (msg.type === 'image' || msg.image?.dataUrl || msg.image?.url) {
+    return msg.body ? msg.body : '[Image]';
+  }
+  const parsed = parseReplyBody(msg.body || '');
+  return parsed.mainText || msg.body || '';
+}
+
 // --- MAIN CHAT CONTENT ---
 
 function ChatContent() {
@@ -101,6 +110,7 @@ function ChatContent() {
   const [replyTo, setReplyTo] = useState(null);
   const [status, setStatus] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const [imageDraft, setImageDraft] = useState(null);
 
   // Refs
   const scrollRef = useRef(null);
@@ -208,30 +218,128 @@ function ChatContent() {
   };
 
   const handleSend = async () => {
-    if (!activeChat || !inputText.trim()) return;
+    if (!activeChat || (!inputText.trim() && !imageDraft)) return;
     
     const rawText = inputText.trim();
     let body = rawText;
 
     if (replyTo) {
-      const parsed = parseReplyBody(replyTo.body || '');
-      const cleanSnippet = (parsed.mainText || replyTo.body || '').replace(/\s+/g, ' ').slice(0, 60);
+      const cleanSnippet = getReplySnippet(replyTo).replace(/\s+/g, ' ').slice(0, 60);
       body = `↪ ${replyTo.from}: ${cleanSnippet}\n\n${rawText}`;
     }
 
     const tempId = 'local-' + Date.now();
-    const newMsg = { id: tempId, from: username, to: activeChat, body, ts: Date.now() };
+    const newMsg = {
+      id: tempId,
+      from: username,
+      to: activeChat,
+      body,
+      ts: Date.now(),
+      type: imageDraft ? 'image' : 'text',
+      image: imageDraft ? { url: imageDraft.url, width: imageDraft.width, height: imageDraft.height } : null,
+    };
     setMessages(prev => [...prev, newMsg]);
     setInputText('');
     setReplyTo(null);
+    setImageDraft(null);
 
     try {
       await fetch('/api/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password, to: activeChat, body }),
+        body: JSON.stringify({
+          username,
+          password,
+          to: activeChat,
+          body,
+          type: imageDraft ? 'image' : 'text',
+          image: imageDraft ? { url: imageDraft.url, width: imageDraft.width, height: imageDraft.height } : null,
+        }),
       });
     } catch (e) { console.error(e); }
+  };
+
+  const dataUrlToBlob = (dataUrl) => {
+    const [header, data] = dataUrl.split(',', 2);
+    const match = /data:(.*?);base64/.exec(header || '');
+    const contentType = match ? match[1] : 'image/jpeg';
+    const binary = atob(data || '');
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new Blob([bytes], { type: contentType });
+  };
+
+  const handleImageSelect = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setStatus('Please select an image file');
+      return;
+    }
+
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = dataUrl;
+    });
+
+    const maxSize = 1280;
+    let { width, height } = img;
+    if (width > maxSize || height > maxSize) {
+      const ratio = Math.min(maxSize / width, maxSize / height);
+      width = Math.round(width * ratio);
+      height = Math.round(height * ratio);
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      setStatus('Image processing failed');
+      return;
+    }
+    ctx.drawImage(img, 0, 0, width, height);
+
+    const compressed = canvas.toDataURL('image/jpeg', 0.7);
+    if (compressed.length > 900000) {
+      setStatus('Image is too large after compression');
+      return;
+    }
+
+    setStatus('Uploading image...');
+    const blob = dataUrlToBlob(compressed);
+    const uploadForm = new FormData();
+    uploadForm.append('file', blob, 'upload.jpg');
+
+    try {
+      const res = await fetch('/api/upload', { method: 'POST', body: uploadForm });
+      const data = await res.json();
+      if (!res.ok || !data.ok || !data.url) {
+        throw new Error(data.error || 'Upload failed');
+      }
+      setImageDraft({
+        url: data.url,
+        previewUrl: compressed,
+        width: data.width || width,
+        height: data.height || height,
+      });
+      setStatus('');
+    } catch (err) {
+      console.error(err);
+      setStatus('Image upload failed');
+    }
   };
 
   const groupedMessages = useMemo(() => {
@@ -404,6 +512,8 @@ function ChatContent() {
             );
             
             const { isMe, data, isLastInSequence } = item;
+            const imageUrl = data?.image?.url || data?.image?.dataUrl;
+            const isImageMessage = data?.type === 'image' || !!imageUrl;
             const { isReply, replyAuthor, replySnippet, mainText } = parseReplyBody(data.body);
 
             return (
@@ -434,7 +544,18 @@ function ChatContent() {
                           <div className="opacity-80 break-words whitespace-normal">{replySnippet}</div>
                         </div>
                       )}
-                      {mainText}
+                      {imageUrl && (
+                        <img
+                          src={imageUrl}
+                          alt="Shared image"
+                          className="block max-h-64 w-auto rounded-lg border border-black/10 object-cover"
+                        />
+                      )}
+                      {mainText && (
+                        <div className={isImageMessage ? 'mt-2' : ''}>
+                          {mainText}
+                        </div>
+                      )}
                       <div className={`text-[9px] mt-1 flex justify-end gap-1 ${isMe ? 'text-indigo-200' : 'text-zinc-400'}`}>
                         {formatTime(data.ts)} {isMe && '✓'}
                       </div>
@@ -464,14 +585,38 @@ function ChatContent() {
                 <button onClick={() => setReplyTo(null)} className="p-1 hover:bg-indigo-200 rounded-full text-indigo-600"><X size={14} /></button>
               </div>
             )}
+            {status && (
+              <div className="text-xs text-red-500 mb-2 mx-1 md:mx-0">{status}</div>
+            )}
+            {imageDraft && (
+              <div className="flex items-center gap-2 bg-zinc-50 border border-zinc-200 rounded-xl p-2 mb-2 mx-1 md:mx-0">
+                <img
+                  src={imageDraft.previewUrl || imageDraft.url}
+                  alt="Image preview"
+                  className="h-12 w-12 rounded-lg object-cover border border-black/10"
+                />
+                <div className="text-xs text-zinc-600 flex-1">Image ready to send</div>
+                <button
+                  onClick={() => setImageDraft(null)}
+                  className="p-1 rounded-full hover:bg-zinc-200 text-zinc-500"
+                  aria-label="Remove image"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
             <div className="flex items-end gap-2 max-w-4xl mx-auto">
+              <label className="p-3 rounded-full bg-zinc-100 text-zinc-600 hover:bg-zinc-200 transition cursor-pointer">
+                <input type="file" accept="image/*" onChange={handleImageSelect} className="hidden" />
+                <ImagePlus size={18} />
+              </label>
               <input
                 className="flex-1 py-3 px-4 rounded-full bg-zinc-100 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 border border-transparent outline-none transition text-base md:text-sm"
                 placeholder="Type a message..."
                 value={inputText} onChange={e => setInputText(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleSend())}
               />
-              <button onClick={handleSend} disabled={!inputText.trim()} className="p-3 rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition disabled:opacity-50">
+              <button onClick={handleSend} disabled={!inputText.trim() && !imageDraft} className="p-3 rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition disabled:opacity-50">
                 <Send size={18} className={inputText.trim() ? "translate-x-0.5" : ""} />
               </button>
             </div>

@@ -4,9 +4,13 @@ import { db, messaging } from '../../../lib/firebaseAdmin';
 
 export async function POST(req) {
   try {
-    const { username, password, to, body } = await req.json();
+    const { username, password, to, body, type, image } = await req.json();
 
-    if (!username || !to || !body) {
+    const hasText = typeof body === 'string' && body.trim().length > 0;
+    const hasImageUrl = image && typeof image.url === 'string' && image.url.startsWith('http');
+    const hasImage = hasImageUrl;
+
+    if (!username || !to || (!hasText && !hasImage)) {
       return NextResponse.json(
         { ok: false, error: 'missing fields' },
         { status: 400 }
@@ -42,10 +46,20 @@ export async function POST(req) {
     const participants = [username, to].sort().join('_'); // "alice_bob"
     const participantsArr = [username, to];
 
+    const imagePayload = hasImageUrl
+      ? {
+          url: image.url,
+          width: image.width || null,
+          height: image.height || null,
+        }
+      : null;
+
     const msgData = {
       from: username,
       to,
-      body,
+      body: hasText ? body : '',
+      type: hasImage ? 'image' : 'text',
+      image: imagePayload,
       ts: now,
       participants,
       participantsArr,
@@ -56,11 +70,13 @@ export async function POST(req) {
 
     // 4) Upsert conversation summary (1 doc per pair)
     const convRef = db.collection('conversations').doc(participants);
+    const lastBody = hasImage ? (hasText ? `Image: ${body}` : '[Image]') : body;
+
     await convRef.set(
       {
         participants,
         participantsArr,
-        lastBody: body,
+        lastBody,
         lastTs: now,
         lastFrom: username,
         updatedAt: new Date(now),
@@ -73,12 +89,12 @@ export async function POST(req) {
     const fcmPayload = {
       notification: {
         title: username,
-        body,
+        body: lastBody,
       },
       data: {
         sender: username,
         toUser: to,
-        msg: body,
+        msg: lastBody,
         ts: String(now),
       },
       topic,
