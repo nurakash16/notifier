@@ -6,10 +6,14 @@ export async function POST(req) {
     const { username, to, callId } = await req.json();
 
     if (!username || !to || !callId) {
-      return NextResponse.json(
-        { ok: false, error: 'missing fields' },
+    return NextResponse.json(
+        {
+        ok: false,
+        error: 'missing fields',
+        received: { username, to, callId }
+        },
         { status: 400 }
-      );
+    );
     }
 
     // 1) Make sure caller exists
