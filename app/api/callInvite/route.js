@@ -37,12 +37,6 @@ export async function POST(req) {
     const isVideo = callType === 'video';
 
     const fcmPayload = {
-      notification: {
-        title: isVideo ? 'Incoming video call' : 'Incoming voice call',
-        body: isVideo
-          ? `${username} is video calling you`
-          : `${username} is calling you`,
-      },
       data: {
         type: 'call',
         callType: isVideo ? 'video' : 'voice',
@@ -50,8 +44,17 @@ export async function POST(req) {
         toUser: to,
         callId,
         ts: String(now),
+
+        // optional text for Android service
+        title: isVideo ? 'Incoming video call' : 'Incoming voice call',
+        body: isVideo
+          ? `${username} is video calling you`
+          : `${username} is calling you`,
       },
       topic,
+      android: {
+        priority: 'high',
+      },
     };
 
     try {
