@@ -5,15 +5,24 @@ import Link from 'next/link';
 import { useRouter, useSearchParams, usePathname } from 'next/navigation'; // 🔥 NEW IMPORTS
 import {
   Send, LogOut, MessageSquare, Search,
-  ChevronLeft, X, Radio, ImagePlus
+  ChevronLeft, X, Radio, ImagePlus, Phone, Video, Mic, MicOff, VideoOff, PhoneOff, RefreshCcw
 } from 'lucide-react';
 
 // 🔥 Firestore imports
 import { db } from '../../lib/firebaseClient'; 
 import {
   collection, query, where, orderBy, limitToLast, onSnapshot,
-  doc, setDoc, getDoc
+  doc, setDoc, getDoc, addDoc, updateDoc, limit, runTransaction
 } from 'firebase/firestore';
+import {
+  CALL_PHASE,
+  CALL_STATUS,
+  buildInitialCallDoc,
+  callDocRef,
+  callerCandidatesRef,
+  createCallId,
+  receiverCandidatesRef,
+} from '../../lib/calls';
 
 // --- UTILITIES ---
 
@@ -117,6 +126,18 @@ const getPreviewText = (payload, fallbackText) => {
   return text || '';
 };
 
+const initialCallUiState = {
+  phase: CALL_PHASE.IDLE,
+  callId: null,
+  direction: null,
+  callType: null,
+  peer: null,
+  error: '',
+  startedAt: null,
+  endedAt: null,
+};
+const RING_TIMEOUT_MS = 45 * 1000;
+
 // --- MAIN CHAT CONTENT ---
 
 function ChatContent() {
@@ -151,6 +172,14 @@ function ChatContent() {
   const [userProfiles, setUserProfiles] = useState({});
   const [reactionPickerId, setReactionPickerId] = useState(null);
   const [recipientKeyMissing, setRecipientKeyMissing] = useState(false);
+  const [callUi, setCallUi] = useState(initialCallUiState);
+  const [localMediaStream, setLocalMediaStream] = useState(null);
+  const [remoteMediaStream, setRemoteMediaStream] = useState(null);
+  const [incomingCall, setIncomingCall] = useState(null);
+  const [isMicMuted, setIsMicMuted] = useState(false);
+  const [isCameraEnabled, setIsCameraEnabled] = useState(true);
+  const [cameraFacingMode, setCameraFacingMode] = useState('user');
+  const [callLogs, setCallLogs] = useState([]);
 
   // Refs
   const scrollRef = useRef(null);
@@ -159,6 +188,24 @@ function ChatContent() {
   const decryptedRef = useRef({});
   const longPressTimerRef = useRef(null);
   const longPressTriggeredRef = useRef(false);
+  const peerConnectionRef = useRef(null);
+  const localStreamRef = useRef(null);
+  const remoteStreamRef = useRef(null);
+  const callUnsubRef = useRef(null);
+  const candidateUnsubRef = useRef([]);
+  const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
+  const callFinalizeRef = useRef({ callId: null, saved: false });
+  const ringTimeoutRef = useRef(null);
+  const tabIdRef = useRef(null);
+  const networkStateRef = useRef('new');
+
+  const rtcConfig = useMemo(() => ({
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+    ],
+  }), []);
 
   // 🔥 Helper to set URL param instead of local state
   const handleSetActiveChat = (name) => {
@@ -173,6 +220,13 @@ function ChatContent() {
   };
 
   // 1. Check LocalStorage
+  useEffect(() => {
+    if (typeof window !== 'undefined' && !tabIdRef.current) {
+      tabIdRef.current = window.sessionStorage.getItem('notifierWebTabId') || `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      window.sessionStorage.setItem('notifierWebTabId', tabIdRef.current);
+    }
+  }, []);
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
     try {
@@ -319,6 +373,20 @@ function ChatContent() {
     };
   }, [isLoggedIn, username]);
 
+  useEffect(() => {
+    if (!callUi.callId) return;
+    if (callUi.phase === CALL_PHASE.IDLE || callUi.phase === CALL_PHASE.ENDED) return;
+    const handleBeforeUnload = () => {
+      updateDoc(callDocRef(db, callUi.callId), {
+        status: CALL_STATUS.ENDED,
+        endedAt: Date.now(),
+        endedBy: username,
+      }).catch(() => {});
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [callUi.callId, callUi.phase, username]);
+
   // 3.2 Track active chat last seen
   useEffect(() => {
     if (!activeChat) {
@@ -378,6 +446,142 @@ function ChatContent() {
     }
   }, [messages, replyTo]);
 
+  useEffect(() => {
+    return () => {
+      cleanupCallSession();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!localVideoRef.current) return;
+    localVideoRef.current.srcObject = localMediaStream || null;
+  }, [localMediaStream]);
+
+  useEffect(() => {
+    if (!remoteVideoRef.current) return;
+    remoteVideoRef.current.srcObject = remoteMediaStream || null;
+  }, [remoteMediaStream]);
+
+  useEffect(() => {
+    if (!isLoggedIn || !username) return;
+
+    const q = query(
+      collection(db, 'calls'),
+      where('to', '==', username),
+      where('status', '==', CALL_STATUS.RINGING),
+      orderBy('startedAt', 'desc'),
+      limitToLast(1)
+    );
+
+    const unsub = onSnapshot(q, (snap) => {
+      const hit = snap.docs[0];
+      if (!hit) {
+        setIncomingCall(null);
+        return;
+      }
+      const data = hit.data();
+      const tabId = tabIdRef.current;
+      if (data?.handledBy && tabId && data.handledBy !== tabId) {
+        setIncomingCall(null);
+        return;
+      }
+      if (callUi.phase === CALL_PHASE.IDLE || callUi.phase === CALL_PHASE.ENDED) {
+        setIncomingCall({ id: hit.id, ...data });
+      }
+    });
+
+    return () => unsub();
+  }, [isLoggedIn, username, callUi.phase]);
+
+  useEffect(() => {
+    if (!incomingCall?.callId) return;
+    const startedAt = incomingCall.startedAt || Date.now();
+    const elapsed = Date.now() - startedAt;
+    const waitMs = Math.max(0, RING_TIMEOUT_MS - elapsed);
+    const timer = setTimeout(async () => {
+      try {
+        const callRef = callDocRef(db, incomingCall.callId);
+        await updateDoc(callRef, {
+          status: CALL_STATUS.MISSED,
+          endedAt: Date.now(),
+        });
+        await saveCallLog({
+          callId: incomingCall.callId,
+          callType: incomingCall.callType || 'voice',
+          direction: 'incoming',
+          peer: incomingCall.from,
+          status: CALL_STATUS.MISSED,
+          endReason: 'ring_timeout',
+          networkState: networkStateRef.current,
+          startedAt,
+          endedAt: Date.now(),
+        });
+      } catch (err) {
+        console.error('incoming ring timeout failed', err);
+      } finally {
+        setIncomingCall(null);
+      }
+    }, waitMs);
+    return () => clearTimeout(timer);
+  }, [incomingCall?.callId]);
+
+  useEffect(() => {
+    if (!isLoggedIn || !username) return;
+    if (callUi.phase !== CALL_PHASE.IDLE && callUi.phase !== CALL_PHASE.ENDED) return;
+
+    const qFrom = query(
+      collection(db, 'calls'),
+      where('from', '==', username),
+      where('status', '==', CALL_STATUS.ACCEPTED),
+      orderBy('startedAt', 'desc'),
+      limitToLast(1)
+    );
+    const qTo = query(
+      collection(db, 'calls'),
+      where('to', '==', username),
+      where('status', '==', CALL_STATUS.ACCEPTED),
+      orderBy('startedAt', 'desc'),
+      limitToLast(1)
+    );
+
+    const applyRecovered = (snap, direction) => {
+      const hit = snap.docs[0];
+      if (!hit) return;
+      const data = hit.data();
+      setCallUi((prev) => ({
+        ...prev,
+        phase: CALL_PHASE.ACTIVE,
+        callId: data.callId || hit.id,
+        callType: data.callType || 'voice',
+        direction,
+        peer: direction === 'outgoing' ? data.to : data.from,
+        startedAt: data.startedAt || Date.now(),
+      }));
+    };
+
+    const unsubFrom = onSnapshot(qFrom, (snap) => applyRecovered(snap, 'outgoing'));
+    const unsubTo = onSnapshot(qTo, (snap) => applyRecovered(snap, 'incoming'));
+    return () => {
+      unsubFrom();
+      unsubTo();
+    };
+  }, [isLoggedIn, username, callUi.phase]);
+
+  useEffect(() => {
+    if (!isLoggedIn || !username) return;
+    const q = query(
+      collection(db, 'callLogs'),
+      where('owner', '==', username),
+      orderBy('endedAt', 'desc'),
+      limit(10)
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      const rows = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setCallLogs(rows);
+    }, (err) => console.error('call log listen failed', err));
+    return () => unsub();
+  }, [isLoggedIn, username]);
+
   const getUserPublicKeyJwk = async (name) => {
     const cache = publicKeyCacheRef.current;
     if (cache.has(name)) return cache.get(name);
@@ -395,6 +599,486 @@ function ChatContent() {
   const importPublicKey = async (jwk) => (
     crypto.subtle.importKey('jwk', jwk, { name: 'ECDH', namedCurve: 'P-256' }, true, [])
   );
+
+  const clearCallRealtimeListeners = () => {
+    if (callUnsubRef.current) {
+      callUnsubRef.current();
+      callUnsubRef.current = null;
+    }
+    if (candidateUnsubRef.current.length) {
+      candidateUnsubRef.current.forEach((fn) => {
+        try {
+          fn();
+        } catch {}
+      });
+      candidateUnsubRef.current = [];
+    }
+  };
+
+  const clearRingTimeout = () => {
+    if (ringTimeoutRef.current) {
+      clearTimeout(ringTimeoutRef.current);
+      ringTimeoutRef.current = null;
+    }
+  };
+
+  const cleanupCallMedia = () => {
+    if (peerConnectionRef.current) {
+      try {
+        peerConnectionRef.current.close();
+      } catch {}
+      peerConnectionRef.current = null;
+    }
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {}
+      });
+      localStreamRef.current = null;
+    }
+
+    if (remoteStreamRef.current) {
+      remoteStreamRef.current.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {}
+      });
+      remoteStreamRef.current = null;
+    }
+
+    setLocalMediaStream(null);
+    setRemoteMediaStream(null);
+  };
+
+  const cleanupCallSession = () => {
+    clearRingTimeout();
+    clearCallRealtimeListeners();
+    cleanupCallMedia();
+    networkStateRef.current = 'closed';
+  };
+
+  const ensureLocalMedia = async (callType) => {
+    if (localStreamRef.current) return localStreamRef.current;
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: callType === 'video' ? { facingMode: cameraFacingMode } : false,
+    });
+    localStreamRef.current = stream;
+    setLocalMediaStream(stream);
+    setIsMicMuted(false);
+    setIsCameraEnabled(callType === 'video');
+    return stream;
+  };
+
+  const saveCallLog = async ({
+    callId, callType, direction, peer, status, startedAt, endedAt, endReason, networkState,
+  }) => {
+    if (!username || !callId) return;
+    if (callFinalizeRef.current.callId === callId && callFinalizeRef.current.saved) return;
+    const durationSec = startedAt && endedAt ? Math.max(0, Math.floor((endedAt - startedAt) / 1000)) : 0;
+    try {
+      await setDoc(doc(db, 'callLogs', callId), {
+        callId,
+        owner: username,
+        peer: peer || null,
+        callType: callType || 'voice',
+        direction: direction || 'outgoing',
+        status: status || 'ended',
+        endReason: endReason || status || 'ended',
+        networkState: networkState || networkStateRef.current || 'unknown',
+        startedAt: startedAt || Date.now(),
+        endedAt: endedAt || Date.now(),
+        durationSec,
+        updatedAt: Date.now(),
+      }, { merge: true });
+      callFinalizeRef.current = { callId, saved: true };
+    } catch (err) {
+      console.error('save call log failed', err);
+    }
+  };
+
+  const setupPeerConnection = async ({ callId, role, callType }) => {
+    const pc = new RTCPeerConnection(rtcConfig);
+    peerConnectionRef.current = pc;
+    networkStateRef.current = pc.connectionState || 'new';
+
+    const local = await ensureLocalMedia(callType);
+    local.getTracks().forEach((track) => pc.addTrack(track, local));
+
+    const remote = new MediaStream();
+    remoteStreamRef.current = remote;
+    setRemoteMediaStream(remote);
+
+    pc.ontrack = (event) => {
+      event.streams[0]?.getTracks().forEach((track) => remote.addTrack(track));
+      setRemoteMediaStream(new MediaStream(remote.getTracks()));
+    };
+
+    pc.onicecandidate = async (event) => {
+      if (!event.candidate) return;
+      const targetRef = role === 'caller'
+        ? callerCandidatesRef(db, callId)
+        : receiverCandidatesRef(db, callId);
+      try {
+        await addDoc(targetRef, event.candidate.toJSON());
+      } catch (err) {
+        console.error('candidate write failed', err);
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      networkStateRef.current = pc.connectionState || networkStateRef.current || 'unknown';
+    };
+
+    return pc;
+  };
+
+  const attachCallDocListener = (callId, handler) => {
+    if (callUnsubRef.current) {
+      callUnsubRef.current();
+      callUnsubRef.current = null;
+    }
+    callUnsubRef.current = onSnapshot(doc(db, 'calls', callId), handler);
+  };
+
+  const claimCallOwnership = async (callId) => {
+    const owner = tabIdRef.current || 'unknown_tab';
+    const ref = callDocRef(db, callId);
+    return runTransaction(db, async (tx) => {
+      const snap = await tx.get(ref);
+      const data = snap.data() || {};
+      if (data.handledBy && data.handledBy !== owner) {
+        throw new Error('Call already handled in another tab');
+      }
+      tx.update(ref, { handledBy: owner, handledAt: Date.now() });
+      return true;
+    });
+  };
+
+  const endCurrentCall = async (endedBy = username) => {
+    const endedAt = Date.now();
+    const finalStatus = CALL_STATUS.ENDED;
+    if (callUi.callId) {
+      try {
+        await updateDoc(callDocRef(db, callUi.callId), {
+          status: finalStatus,
+          endedBy,
+          endedAt,
+        });
+      } catch (err) {
+        console.error('end call update failed', err);
+      }
+      await saveCallLog({
+        callId: callUi.callId,
+        callType: callUi.callType,
+        direction: callUi.direction,
+        peer: callUi.peer,
+        status: finalStatus,
+        endReason: endedBy === username ? 'local_hangup' : 'remote_end',
+        networkState: networkStateRef.current,
+        startedAt: callUi.startedAt,
+        endedAt,
+      });
+    }
+    cleanupCallSession();
+    setCallUi({
+      ...initialCallUiState,
+      phase: CALL_PHASE.ENDED,
+      endedAt: Date.now(),
+    });
+  };
+
+  const startOutgoingCall = async (callType = 'voice') => {
+    if (!activeChat || !username) return;
+    if (callUi.phase !== CALL_PHASE.IDLE && callUi.phase !== CALL_PHASE.ENDED) return;
+    setStatus('');
+    cleanupCallSession();
+
+    const callId = createCallId(username, activeChat);
+    callFinalizeRef.current = { callId, saved: false };
+    setCallUi({
+      ...initialCallUiState,
+      phase: CALL_PHASE.OUTGOING,
+      callId,
+      direction: 'outgoing',
+      callType,
+      peer: activeChat,
+      startedAt: Date.now(),
+    });
+
+    try {
+      const pc = await setupPeerConnection({ callId, role: 'caller', callType });
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      await setDoc(callDocRef(db, callId), {
+        ...buildInitialCallDoc({ callId, from: username, to: activeChat, callType }),
+        offer: {
+          type: offer.type,
+          sdp: offer.sdp,
+        },
+        handledBy: tabIdRef.current || null,
+        handledAt: Date.now(),
+      });
+      clearRingTimeout();
+      ringTimeoutRef.current = setTimeout(async () => {
+        try {
+          await updateDoc(callDocRef(db, callId), {
+            status: CALL_STATUS.MISSED,
+            endedAt: Date.now(),
+            endedBy: username,
+          });
+          await saveCallLog({
+            callId,
+            callType,
+            direction: 'outgoing',
+            peer: activeChat,
+            status: CALL_STATUS.MISSED,
+            endReason: 'ring_timeout',
+            networkState: networkStateRef.current,
+            startedAt: Date.now(),
+            endedAt: Date.now(),
+          });
+        } catch (err) {
+          console.error('ring timeout update failed', err);
+        }
+      }, RING_TIMEOUT_MS);
+
+      attachCallDocListener(callId, async (snap) => {
+        const data = snap.data();
+        if (!data) return;
+
+        if (data.answer?.sdp && !pc.currentRemoteDescription) {
+          await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+          clearRingTimeout();
+          setCallUi((prev) => ({ ...prev, phase: CALL_PHASE.ACTIVE }));
+        }
+
+        if ([CALL_STATUS.REJECTED, CALL_STATUS.ENDED, CALL_STATUS.MISSED].includes(data.status)) {
+          const endedAt = Date.now();
+          saveCallLog({
+            callId,
+            callType,
+            direction: 'outgoing',
+            peer: activeChat,
+            status: data.status,
+            endReason: data.status === CALL_STATUS.REJECTED ? 'remote_rejected' : (data.status === CALL_STATUS.MISSED ? 'timeout' : 'remote_end'),
+            networkState: networkStateRef.current,
+            startedAt: callUi.startedAt || Date.now(),
+            endedAt,
+          });
+          cleanupCallSession();
+          setCallUi((prev) => ({ ...prev, phase: CALL_PHASE.ENDED, endedAt }));
+        }
+      });
+
+      const receiverUnsub = onSnapshot(receiverCandidatesRef(db, callId), (snap) => {
+        snap.docChanges().forEach(async (change) => {
+          if (change.type !== 'added') return;
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
+          } catch (err) {
+            console.error('add remote candidate failed', err);
+          }
+        });
+      });
+      candidateUnsubRef.current.push(receiverUnsub);
+
+      const inviteRes = await fetch('/api/callInvite', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username,
+          to: activeChat,
+          callId,
+          callType,
+        }),
+      });
+      const inviteData = await inviteRes.json();
+      if (!inviteRes.ok || !inviteData.ok) {
+        throw new Error(inviteData?.error || 'Call invite failed');
+      }
+
+      setCallUi((prev) => ({ ...prev, phase: CALL_PHASE.CONNECTING }));
+    } catch (err) {
+      console.error('start call failed', err);
+      setStatus(err?.message || 'Call start failed');
+      cleanupCallSession();
+      setCallUi({
+        ...initialCallUiState,
+        phase: CALL_PHASE.ENDED,
+        error: err?.message || 'Call start failed',
+        endedAt: Date.now(),
+      });
+    }
+  };
+
+  const rejectIncomingCall = async () => {
+    if (!incomingCall?.callId) return;
+    clearRingTimeout();
+    const endedAt = Date.now();
+    try {
+      await updateDoc(callDocRef(db, incomingCall.callId), {
+        status: CALL_STATUS.REJECTED,
+        endedAt,
+        endedBy: username,
+      });
+      await saveCallLog({
+        callId: incomingCall.callId,
+        callType: incomingCall.callType || 'voice',
+        direction: 'incoming',
+        peer: incomingCall.from,
+        status: CALL_STATUS.REJECTED,
+        endReason: 'local_reject',
+        networkState: networkStateRef.current,
+        startedAt: incomingCall.startedAt || Date.now(),
+        endedAt,
+      });
+    } catch (err) {
+      console.error('reject call failed', err);
+    }
+    setIncomingCall(null);
+  };
+
+  const acceptIncomingCall = async () => {
+    if (!incomingCall?.callId) return;
+    const callId = incomingCall.callId;
+    const callType = incomingCall.callType || 'voice';
+    callFinalizeRef.current = { callId, saved: false };
+
+    setCallUi({
+      ...initialCallUiState,
+      phase: CALL_PHASE.CONNECTING,
+      callId,
+      direction: 'incoming',
+      callType,
+      peer: incomingCall.from,
+      startedAt: Date.now(),
+    });
+
+    try {
+      await claimCallOwnership(callId);
+      cleanupCallSession();
+      const pc = await setupPeerConnection({ callId, role: 'receiver', callType });
+      if (!incomingCall.offer?.sdp) throw new Error('Missing offer');
+
+      await pc.setRemoteDescription(new RTCSessionDescription(incomingCall.offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      await updateDoc(callDocRef(db, callId), {
+        answer: { type: answer.type, sdp: answer.sdp },
+        status: CALL_STATUS.ACCEPTED,
+        acceptedAt: Date.now(),
+      });
+      clearRingTimeout();
+
+      attachCallDocListener(callId, (snap) => {
+        const data = snap.data();
+        if (!data) return;
+        if ([CALL_STATUS.ENDED, CALL_STATUS.MISSED].includes(data.status)) {
+          const endedAt = Date.now();
+          saveCallLog({
+            callId,
+            callType,
+            direction: 'incoming',
+            peer: incomingCall.from,
+            status: data.status,
+            endReason: data.status === CALL_STATUS.MISSED ? 'timeout' : 'remote_end',
+            networkState: networkStateRef.current,
+            startedAt: callUi.startedAt || Date.now(),
+            endedAt,
+          });
+          cleanupCallSession();
+          setCallUi((prev) => ({ ...prev, phase: CALL_PHASE.ENDED, endedAt }));
+        } else if (data.status === CALL_STATUS.ACCEPTED) {
+          setCallUi((prev) => ({ ...prev, phase: CALL_PHASE.ACTIVE }));
+        }
+      });
+
+      const callerUnsub = onSnapshot(callerCandidatesRef(db, callId), (snap) => {
+        snap.docChanges().forEach(async (change) => {
+          if (change.type !== 'added') return;
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
+          } catch (err) {
+            console.error('add caller candidate failed', err);
+          }
+        });
+      });
+      candidateUnsubRef.current.push(callerUnsub);
+      setIncomingCall(null);
+    } catch (err) {
+      console.error('accept call failed', err);
+      setStatus(err?.message || 'Accept call failed');
+      cleanupCallSession();
+      setCallUi({
+        ...initialCallUiState,
+        phase: CALL_PHASE.ENDED,
+        error: err?.message || 'Accept call failed',
+        endedAt: Date.now(),
+      });
+    }
+  };
+
+  const toggleMute = () => {
+    const stream = localStreamRef.current;
+    if (!stream) return;
+    const nextMuted = !isMicMuted;
+    stream.getAudioTracks().forEach((track) => {
+      track.enabled = !nextMuted;
+    });
+    setIsMicMuted(nextMuted);
+  };
+
+  const toggleCamera = () => {
+    const stream = localStreamRef.current;
+    if (!stream) return;
+    const videoTracks = stream.getVideoTracks();
+    if (!videoTracks.length) return;
+    const nextEnabled = !isCameraEnabled;
+    videoTracks.forEach((track) => {
+      track.enabled = nextEnabled;
+    });
+    setIsCameraEnabled(nextEnabled);
+  };
+
+  const switchCamera = async () => {
+    if (callUi.callType !== 'video') return;
+    const pc = peerConnectionRef.current;
+    const currentStream = localStreamRef.current;
+    if (!pc || !currentStream) return;
+
+    const nextMode = cameraFacingMode === 'user' ? 'environment' : 'user';
+    try {
+      const switched = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: nextMode },
+      });
+      const newVideoTrack = switched.getVideoTracks()[0];
+      if (!newVideoTrack) return;
+
+      const oldVideoTrack = currentStream.getVideoTracks()[0];
+      const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
+      if (sender) {
+        await sender.replaceTrack(newVideoTrack);
+      }
+      if (oldVideoTrack) {
+        currentStream.removeTrack(oldVideoTrack);
+        oldVideoTrack.stop();
+      }
+      currentStream.addTrack(newVideoTrack);
+      setLocalMediaStream(new MediaStream(currentStream.getTracks()));
+      localStreamRef.current = currentStream;
+      setCameraFacingMode(nextMode);
+      setIsCameraEnabled(true);
+    } catch (err) {
+      console.error('switch camera failed', err);
+      setStatus('Camera switch not available on this device/browser');
+    }
+  };
 
   const encryptPayloadFor = async (recipient, payload) => {
     if (!privateKeyRef.current || !publicKeyJwk) {
@@ -814,6 +1498,8 @@ function ChatContent() {
   const filteredConversations = conversations.filter(c => 
     c.other.toLowerCase().includes(searchQuery.toLowerCase())
   );
+  const isCallOngoing = [CALL_PHASE.OUTGOING, CALL_PHASE.INCOMING, CALL_PHASE.CONNECTING, CALL_PHASE.ACTIVE].includes(callUi.phase);
+  const callPeerName = callUi.peer || (callUi.direction === 'incoming' ? incomingCall?.from : activeChat);
 
   // --- LOGIN UI ---
   if (!isLoggedIn) {
@@ -917,6 +1603,24 @@ function ChatContent() {
               </div>
             </button>
           ))}
+          {!!callLogs.length && (
+            <div className="mt-3 pt-3 border-t border-zinc-200">
+              <div className="px-2 pb-2 text-[10px] font-bold uppercase tracking-wider text-zinc-500">Recent Calls</div>
+              <div className="space-y-1">
+                {callLogs.slice(0, 5).map((log) => (
+                  <div key={log.id} className="px-2 py-2 rounded-lg bg-zinc-50 border border-zinc-200">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-xs font-semibold text-zinc-700 truncate">{log.peer || 'Unknown'}</div>
+                      <div className="text-[10px] text-zinc-500">{log.callType === 'video' ? 'Video' : 'Voice'}</div>
+                    </div>
+                    <div className="text-[10px] text-zinc-500 mt-0.5">
+                      {log.direction} • {log.status} • {Math.floor((log.durationSec || 0) / 60)}m {(log.durationSec || 0) % 60}s
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </aside>
 
@@ -949,6 +1653,26 @@ function ChatContent() {
           </div>
 
           <div className="flex items-center gap-2">
+             {activeChat && (
+               <>
+                 <button
+                   onClick={() => startOutgoingCall('voice')}
+                   disabled={isCallOngoing}
+                   className="p-2 rounded-full bg-emerald-50 text-emerald-600 hover:bg-emerald-100 transition disabled:opacity-50"
+                   title="Voice call"
+                 >
+                   <Phone size={14} />
+                 </button>
+                 <button
+                   onClick={() => startOutgoingCall('video')}
+                   disabled={isCallOngoing}
+                   className="p-2 rounded-full bg-sky-50 text-sky-600 hover:bg-sky-100 transition disabled:opacity-50"
+                   title="Video call"
+                 >
+                   <Video size={14} />
+                 </button>
+               </>
+             )}
              <Link 
                href="/" 
                className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-indigo-50 text-indigo-600 rounded-full text-xs font-semibold hover:bg-indigo-100 transition"
@@ -957,6 +1681,45 @@ function ChatContent() {
              </Link>
           </div>
         </header>
+
+        {callUi.phase !== CALL_PHASE.IDLE && (
+          <div className="px-3 md:px-4 py-2 border-b border-zinc-200 bg-amber-50 flex items-center justify-between gap-2 text-xs">
+            <div className="text-amber-800">
+              {callUi.callType === 'video' ? 'Video' : 'Voice'} call {callUi.phase}
+              {callUi.direction === 'outgoing' && activeChat ? ` with ${activeChat}` : ''}
+            </div>
+            {callUi.phase !== CALL_PHASE.ENDED && (
+              <button
+                onClick={() => endCurrentCall(username)}
+                className="px-3 py-1 rounded-full bg-rose-100 text-rose-700 hover:bg-rose-200 transition"
+              >
+                End
+              </button>
+            )}
+          </div>
+        )}
+
+        {incomingCall && (
+          <div className="px-3 md:px-4 py-2 border-b border-zinc-200 bg-emerald-50 flex items-center justify-between gap-2 text-xs">
+            <div className="text-emerald-800">
+              Incoming {incomingCall.callType === 'video' ? 'video' : 'voice'} call from {incomingCall.from}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={rejectIncomingCall}
+                className="px-3 py-1 rounded-full bg-rose-100 text-rose-700 hover:bg-rose-200 transition"
+              >
+                Reject
+              </button>
+              <button
+                onClick={acceptIncomingCall}
+                className="px-3 py-1 rounded-full bg-emerald-100 text-emerald-700 hover:bg-emerald-200 transition"
+              >
+                Accept
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Messages */}
         <div 
@@ -1133,6 +1896,92 @@ function ChatContent() {
           </div>
         )}
       </main>
+
+      {isCallOngoing && (
+        <div className="absolute inset-0 z-50 bg-zinc-950/95 text-white flex flex-col">
+          <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+            <div>
+              <div className="text-sm font-semibold">{callUi.callType === 'video' ? 'Video call' : 'Voice call'}</div>
+              <div className="text-xs text-zinc-300">{callUi.phase} {callPeerName ? `with ${callPeerName}` : ''}</div>
+            </div>
+            <button
+              onClick={() => endCurrentCall(username)}
+              className="p-2 rounded-full bg-rose-500/20 text-rose-300 hover:bg-rose-500/30"
+              title="End call"
+            >
+              <PhoneOff size={16} />
+            </button>
+          </div>
+
+          <div className="flex-1 p-4 md:p-6 flex flex-col gap-4">
+            {callUi.callType === 'video' ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 h-full">
+                <div className="rounded-2xl bg-black/60 border border-white/10 overflow-hidden relative min-h-[220px]">
+                  <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-cover" />
+                  {!remoteMediaStream && (
+                    <div className="absolute inset-0 flex items-center justify-center text-zinc-300 text-sm">
+                      Waiting for remote video...
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-2xl bg-black/40 border border-white/10 overflow-hidden relative min-h-[220px]">
+                  <video ref={localVideoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
+                  {!isCameraEnabled && (
+                    <div className="absolute inset-0 flex items-center justify-center text-zinc-300 text-sm">
+                      Camera off
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="h-full flex items-center justify-center">
+                <div className="text-center">
+                  <div className="w-20 h-20 rounded-full bg-white/10 mx-auto mb-3 flex items-center justify-center">
+                    <Phone size={28} />
+                  </div>
+                  <div className="font-semibold">{callPeerName || 'In call'}</div>
+                  <div className="text-xs text-zinc-300 mt-1">{callUi.phase}</div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="px-5 py-4 border-t border-white/10 flex items-center justify-center gap-3">
+            <button
+              onClick={toggleMute}
+              className={`p-3 rounded-full transition ${isMicMuted ? 'bg-amber-500/25 text-amber-300' : 'bg-white/10 hover:bg-white/20 text-white'}`}
+              title={isMicMuted ? 'Unmute' : 'Mute'}
+            >
+              {isMicMuted ? <MicOff size={18} /> : <Mic size={18} />}
+            </button>
+            {callUi.callType === 'video' && (
+              <button
+                onClick={toggleCamera}
+                className={`p-3 rounded-full transition ${isCameraEnabled ? 'bg-white/10 hover:bg-white/20 text-white' : 'bg-amber-500/25 text-amber-300'}`}
+                title={isCameraEnabled ? 'Turn camera off' : 'Turn camera on'}
+              >
+                {isCameraEnabled ? <Video size={18} /> : <VideoOff size={18} />}
+              </button>
+            )}
+            {callUi.callType === 'video' && (
+              <button
+                onClick={switchCamera}
+                className="p-3 rounded-full bg-white/10 hover:bg-white/20 text-white transition"
+                title="Switch camera"
+              >
+                <RefreshCcw size={18} />
+              </button>
+            )}
+            <button
+              onClick={() => endCurrentCall(username)}
+              className="p-3 rounded-full bg-rose-500/25 text-rose-300 hover:bg-rose-500/40 transition"
+              title="End call"
+            >
+              <PhoneOff size={18} />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
