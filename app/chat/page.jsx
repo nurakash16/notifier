@@ -1906,7 +1906,7 @@ function ChatContent() {
 
       {isCallOngoing && (
         <div className="absolute inset-0 z-50 bg-zinc-950/95 text-white flex flex-col">
-          <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+          <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between shrink-0">
             <div>
               <div className="text-sm font-semibold">{callUi.callType === 'video' ? 'Video call' : 'Voice call'}</div>
               <div className="text-xs text-zinc-300">{callUi.phase} {callPeerName ? `with ${callPeerName}` : ''}</div>
@@ -1920,10 +1920,10 @@ function ChatContent() {
             </button>
           </div>
 
-          <div className="flex-1 p-4 md:p-6 flex flex-col gap-4">
+          <div className="flex-1 p-4 md:p-6 pb-32 md:pb-28 flex flex-col gap-4 overflow-y-auto">
             {callUi.callType === 'video' ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 h-full">
-                <div className="rounded-2xl bg-black/60 border border-white/10 overflow-hidden relative min-h-[220px]">
+              <div className="relative h-full min-h-[320px] md:min-h-[420px]">
+                <div className="rounded-2xl bg-black/60 border border-white/10 overflow-hidden relative h-full min-h-[280px]">
                   <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-cover" />
                   {!remoteMediaStream && (
                     <div className="absolute inset-0 flex items-center justify-center text-zinc-300 text-sm">
@@ -1931,7 +1931,7 @@ function ChatContent() {
                     </div>
                   )}
                 </div>
-                <div className="rounded-2xl bg-black/40 border border-white/10 overflow-hidden relative min-h-[220px]">
+                <div className="absolute right-3 bottom-3 md:right-4 md:bottom-4 rounded-xl bg-black/70 border border-white/20 overflow-hidden relative w-28 h-40 md:w-36 md:h-52 shadow-xl">
                   <video ref={localVideoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
                   {!isCameraEnabled && (
                     <div className="absolute inset-0 flex items-center justify-center text-zinc-300 text-sm">
@@ -1953,7 +1953,7 @@ function ChatContent() {
             )}
           </div>
 
-          <div className="px-5 py-4 border-t border-white/10 flex items-center justify-center gap-3">
+          <div className="absolute bottom-0 left-0 right-0 z-20 px-4 md:px-5 pt-3 pb-6 md:pb-4 border-t border-white/10 bg-zinc-950/90 backdrop-blur flex items-center justify-center gap-3">
             <button
               onClick={toggleMute}
               className={`p-3 rounded-full transition ${isMicMuted ? 'bg-amber-500/25 text-amber-300' : 'bg-white/10 hover:bg-white/20 text-white'}`}
