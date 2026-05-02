@@ -2007,23 +2007,23 @@ function ChatContent() {
                 </button>
               </div>
             )}
-            <div className="flex items-end gap-2 max-w-4xl mx-auto">
-              <label className="p-3 rounded-full bg-zinc-100 text-zinc-600 hover:bg-zinc-200 transition cursor-pointer">
+            <div className="flex w-full items-end gap-2 max-w-4xl mx-auto">
+              <label className="shrink-0 p-3 rounded-full bg-zinc-100 text-zinc-600 hover:bg-zinc-200 transition cursor-pointer">
                 <input type="file" accept="image/*" onChange={handleImageSelect} className="hidden" />
                 <ImagePlus size={18} />
               </label>
-              <label className="p-3 rounded-full bg-zinc-100 text-zinc-600 hover:bg-zinc-200 transition cursor-pointer">
+              <label className="shrink-0 p-3 rounded-full bg-zinc-100 text-zinc-600 hover:bg-zinc-200 transition cursor-pointer">
                 <input type="file" accept="audio/*" onChange={handleVoiceSelect} className="hidden" />
                 <Mic size={18} />
               </label>
               <input
-                className="flex-1 py-3 px-4 rounded-full bg-zinc-100 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 border border-transparent outline-none transition text-base md:text-sm"
+                className="min-w-0 flex-1 py-3 px-4 rounded-full bg-zinc-100 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 border border-transparent outline-none transition text-base md:text-sm"
                 placeholder="Type a message..."
                 value={inputText} onChange={e => setInputText(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleSend())}
                 disabled={recipientKeyMissing}
               />
-              <button onClick={handleSend} disabled={recipientKeyMissing || !cryptoReady || (!inputText.trim() && !imageDraft && !voiceDraft)} className="p-3 rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition disabled:opacity-50">
+              <button onClick={handleSend} disabled={recipientKeyMissing || !cryptoReady || (!inputText.trim() && !imageDraft && !voiceDraft)} className="shrink-0 p-3 rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition disabled:opacity-50">
                 <Send size={18} className={inputText.trim() ? "translate-x-0.5" : ""} />
               </button>
             </div>
