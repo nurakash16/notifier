@@ -4,7 +4,7 @@ import { db, messaging } from '../../../lib/firebaseAdmin';
 
 export async function POST(req) {
   try {
-    const { username, password, to, body, encrypted } = await req.json();
+    const { username, password, to, body, encrypted, image } = await req.json();
 
     const hasEncrypted =
       encrypted &&
@@ -52,16 +52,13 @@ export async function POST(req) {
     const msgData = {
       from: username,
       to,
-      body: hasEncrypted ? '' : (hasText ? body : ''),
-      type: hasEncrypted ? 'encrypted' : 'text',
-      encrypted: hasEncrypted
-        ? {
-            ciphertext: encrypted.ciphertext,
-            iv: encrypted.iv,
-            senderPubKeyJwk: encrypted.senderPubKeyJwk,
-            v: 1,
-          }
-        : null,
+      body: '',
+      type: encrypted ? 'encrypted' : 'text',
+
+      // 🔥 STORE IMAGE DIRECTLY
+      image: image || null,
+
+      encrypted,
       ts: now,
       participants,
       participantsArr,
@@ -98,6 +95,10 @@ export async function POST(req) {
         toUser: to,
         msg: lastBody,
         ts: String(now),
+
+        // 🔥 ADD IMAGE SUPPORT
+        imageUrl: image?.url || '',
+        type: image ? 'image' : 'text'
       },
       topic,
     };

@@ -1292,6 +1292,13 @@ function ChatContent() {
           to: activeChat,
           body: '',
           encrypted,
+
+          // 🔥 ADD THIS
+          image: imageDraft ? {
+            url: imageDraft.url,
+            width: imageDraft.width,
+            height: imageDraft.height
+          } : null
         }),
       });
     } catch (e) { console.error(e); }
