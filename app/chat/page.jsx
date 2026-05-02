@@ -93,8 +93,12 @@ function getReplySnippet(msg, decrypted) {
   if (!msg) return '';
   const text = decrypted?.text || msg.body || '';
   const image = decrypted?.image || msg.image;
+  const voice = decrypted?.voice || msg.voice;
   if (msg.type === 'image' || image?.url || image?.dataUrl) {
     return text ? text : '[Image]';
+  }
+  if (msg.type === 'voice' || voice?.url) {
+    return text ? text : '[Voice note]';
   }
   const parsed = parseReplyBody(text);
   return parsed.mainText || text || '';
@@ -122,6 +126,9 @@ const getPreviewText = (payload, fallbackText) => {
   const text = payload?.text || fallbackText || '';
   if (payload?.image) {
     return text ? `Image: ${text}` : '[Image]';
+  }
+  if (payload?.voice) {
+    return text ? `Voice: ${text}` : '[Voice note]';
   }
   return text || '';
 };
@@ -165,6 +172,7 @@ function ChatContent() {
   const [status, setStatus] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [imageDraft, setImageDraft] = useState(null);
+  const [voiceDraft, setVoiceDraft] = useState(null);
   const [cryptoReady, setCryptoReady] = useState(false);
   const [publicKeyJwk, setPublicKeyJwk] = useState(null);
   const [decryptedById, setDecryptedById] = useState({});
@@ -180,6 +188,7 @@ function ChatContent() {
   const [isCameraEnabled, setIsCameraEnabled] = useState(true);
   const [cameraFacingMode, setCameraFacingMode] = useState('user');
   const [callLogs, setCallLogs] = useState([]);
+  const [playingVoiceId, setPlayingVoiceId] = useState(null);
 
   // Refs
   const scrollRef = useRef(null);
@@ -199,6 +208,7 @@ function ChatContent() {
   const ringTimeoutRef = useRef(null);
   const tabIdRef = useRef(null);
   const networkStateRef = useRef('new');
+  const voiceAudioRefs = useRef({});
 
   const rtcConfig = useMemo(() => ({
     iceServers: [
@@ -449,8 +459,32 @@ function ChatContent() {
   useEffect(() => {
     return () => {
       cleanupCallSession();
+      Object.values(voiceAudioRefs.current).forEach((audioEl) => {
+        if (audioEl && typeof audioEl.pause === 'function') audioEl.pause();
+      });
     };
   }, []);
+
+  const handleToggleVoicePlayback = (messageId) => {
+    const audioEl = voiceAudioRefs.current[messageId];
+    if (!audioEl) return;
+    if (playingVoiceId && playingVoiceId !== messageId) {
+      const previous = voiceAudioRefs.current[playingVoiceId];
+      if (previous) {
+        previous.pause();
+        previous.currentTime = 0;
+      }
+    }
+    if (audioEl.paused) {
+      audioEl.play().then(() => setPlayingVoiceId(messageId)).catch((err) => {
+        console.error('voice play failed', err);
+      });
+    } else {
+      audioEl.pause();
+      audioEl.currentTime = 0;
+      setPlayingVoiceId(null);
+    }
+  };
 
   useEffect(() => {
     if (!localVideoRef.current) return;
@@ -1225,7 +1259,7 @@ function ChatContent() {
   };
 
   const handleSend = async () => {
-    if (!activeChat || (!inputText.trim() && !imageDraft)) return;
+    if (!activeChat || (!inputText.trim() && !imageDraft && !voiceDraft)) return;
     if (!cryptoReady) {
       setStatus('Encryption not ready');
       return;
@@ -1245,6 +1279,7 @@ function ChatContent() {
     const payload = {
       text: body,
       image: imageDraft ? { url: imageDraft.url, width: imageDraft.width, height: imageDraft.height } : null,
+      voice: voiceDraft ? { url: voiceDraft.url, durationMs: voiceDraft.durationMs } : null,
     };
 
     const tempId = 'local-' + Date.now();
@@ -1281,6 +1316,7 @@ function ChatContent() {
     setInputText('');
     setReplyTo(null);
     setImageDraft(null);
+    setVoiceDraft(null);
 
     try {
       await fetch('/api/send', {
@@ -1298,6 +1334,10 @@ function ChatContent() {
             url: imageDraft.url,
             width: imageDraft.width,
             height: imageDraft.height
+          } : null,
+          voice: voiceDraft ? {
+            url: voiceDraft.url,
+            durationMs: voiceDraft.durationMs
           } : null
         }),
       });
@@ -1384,10 +1424,47 @@ function ChatContent() {
         width: data.width || width,
         height: data.height || height,
       });
+      setVoiceDraft(null);
       setStatus('');
     } catch (err) {
       console.error(err);
       setStatus('Image upload failed');
+    }
+  };
+
+  const handleVoiceSelect = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('audio/')) {
+      setStatus('Please select an audio file');
+      return;
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      setStatus('Audio file is too large');
+      return;
+    }
+
+    try {
+      setStatus('Uploading voice note...');
+      const uploadForm = new FormData();
+      uploadForm.append('file', file);
+      uploadForm.append('username', username);
+      const res = await fetch('/api/uploadVoice', { method: 'POST', body: uploadForm });
+      const data = await res.json();
+      if (!res.ok || !data.ok || !data.url) {
+        throw new Error(data.error || 'Upload failed');
+      }
+      setVoiceDraft({
+        url: data.url,
+        name: file.name,
+        durationMs: 0,
+      });
+      setImageDraft(null);
+      setStatus('');
+    } catch (err) {
+      console.error(err);
+      setStatus('Voice upload failed');
     }
   };
 
@@ -1745,6 +1822,7 @@ function ChatContent() {
             const decrypted = decryptedById[item.id];
             const displayText = decrypted?.text || data.body || '';
             const imageUrl = decrypted?.image?.url || data?.image?.url || data?.image?.dataUrl;
+            const voiceUrl = decrypted?.voice?.url || data?.voice?.url;
             const isImageMessage = !!imageUrl;
             const { isReply, replyAuthor, replySnippet, mainText } = parseReplyBody(displayText);
 
@@ -1793,8 +1871,40 @@ function ChatContent() {
                           className="block max-h-64 w-auto rounded-lg border border-black/10 object-cover"
                         />
                       )}
+                      {voiceUrl && (
+                        <div className="mt-1">
+                          <audio
+                            ref={(el) => {
+                              if (el) {
+                                voiceAudioRefs.current[item.id] = el;
+                              } else {
+                                delete voiceAudioRefs.current[item.id];
+                              }
+                            }}
+                            onEnded={() => {
+                              if (playingVoiceId === item.id) setPlayingVoiceId(null);
+                            }}
+                            className="hidden"
+                          >
+                            <source src={voiceUrl} />
+                          </audio>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleToggleVoicePlayback(item.id);
+                            }}
+                            className={`px-3 py-1.5 rounded-full text-xs border transition ${
+                              isMe
+                                ? 'border-white/40 bg-white/15 text-white hover:bg-white/25'
+                                : 'border-zinc-300 bg-zinc-100 text-zinc-700 hover:bg-zinc-200'
+                            }`}
+                          >
+                            {playingVoiceId === item.id ? 'Stop voice' : 'Play voice'}
+                          </button>
+                        </div>
+                      )}
                       {mainText && (
-                        <div className={isImageMessage ? 'mt-2' : ''}>
+                        <div className={isImageMessage || voiceUrl ? 'mt-2' : ''}>
                           {mainText}
                         </div>
                       )}
@@ -1884,10 +1994,27 @@ function ChatContent() {
                 </button>
               </div>
             )}
+            {voiceDraft && (
+              <div className="flex items-center gap-2 bg-zinc-50 border border-zinc-200 rounded-xl p-2 mb-2 mx-1 md:mx-0">
+                <Mic size={16} className="text-zinc-500" />
+                <div className="text-xs text-zinc-600 flex-1 truncate">{voiceDraft.name || 'Voice note ready to send'}</div>
+                <button
+                  onClick={() => setVoiceDraft(null)}
+                  className="p-1 rounded-full hover:bg-zinc-200 text-zinc-500"
+                  aria-label="Remove voice note"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
             <div className="flex items-end gap-2 max-w-4xl mx-auto">
               <label className="p-3 rounded-full bg-zinc-100 text-zinc-600 hover:bg-zinc-200 transition cursor-pointer">
                 <input type="file" accept="image/*" onChange={handleImageSelect} className="hidden" />
                 <ImagePlus size={18} />
+              </label>
+              <label className="p-3 rounded-full bg-zinc-100 text-zinc-600 hover:bg-zinc-200 transition cursor-pointer">
+                <input type="file" accept="audio/*" onChange={handleVoiceSelect} className="hidden" />
+                <Mic size={18} />
               </label>
               <input
                 className="flex-1 py-3 px-4 rounded-full bg-zinc-100 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 border border-transparent outline-none transition text-base md:text-sm"
@@ -1896,7 +2023,7 @@ function ChatContent() {
                 onKeyDown={e => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleSend())}
                 disabled={recipientKeyMissing}
               />
-              <button onClick={handleSend} disabled={recipientKeyMissing || !cryptoReady || (!inputText.trim() && !imageDraft)} className="p-3 rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition disabled:opacity-50">
+              <button onClick={handleSend} disabled={recipientKeyMissing || !cryptoReady || (!inputText.trim() && !imageDraft && !voiceDraft)} className="p-3 rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition disabled:opacity-50">
                 <Send size={18} className={inputText.trim() ? "translate-x-0.5" : ""} />
               </button>
             </div>

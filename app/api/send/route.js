@@ -24,7 +24,7 @@ function parseAndroidImageBody(body) {
 
 export async function POST(req) {
   try {
-    const { username, password, to, body, encrypted, image } = await req.json();
+    const { username, password, to, body, encrypted, image, voice } = await req.json();
 
     const androidImage = parseAndroidImageBody(body);
     const finalImage = image || androidImage?.image || null;
@@ -38,8 +38,9 @@ export async function POST(req) {
 
     const hasText = finalBody.trim().length > 0;
     const hasImage = !!finalImage?.url;
+    const hasVoice = !!voice?.url;
 
-    if (!username || !to || (!hasEncrypted && !hasText && !hasImage)) {
+    if (!username || !to || (!hasEncrypted && !hasText && !hasImage && !hasVoice)) {
       return NextResponse.json(
         { ok: false, error: 'missing fields' },
         { status: 400 }
@@ -74,6 +75,8 @@ export async function POST(req) {
       ? 'encrypted'
       : hasImage
         ? 'image'
+        : hasVoice
+          ? 'voice'
         : 'text';
 
     const msgData = {
@@ -82,6 +85,7 @@ export async function POST(req) {
       body: hasEncrypted ? '' : finalBody,
       type: messageType,
       image: finalImage,
+      voice: hasVoice ? { url: voice.url, durationMs: Number(voice.durationMs || 0) } : null,
       encrypted: hasEncrypted ? encrypted : null,
       ts: now,
       participants,
@@ -95,6 +99,8 @@ export async function POST(req) {
 
     const lastBody = hasImage
       ? (finalBody ? `Image: ${finalBody}` : '[Image]')
+      : hasVoice
+        ? (finalBody ? `Voice: ${finalBody}` : '[Voice note]')
       : hasEncrypted
         ? '[Encrypted]'
         : finalBody;
@@ -127,6 +133,8 @@ export async function POST(req) {
         imageUrl: finalImage?.url || '',
         imageWidth: String(finalImage?.width || 0),
         imageHeight: String(finalImage?.height || 0),
+        voiceUrl: hasVoice ? voice.url : '',
+        voiceDurationMs: String(voice?.durationMs || 0),
       },
       topic,
     };
@@ -143,6 +151,7 @@ export async function POST(req) {
       ts: now,
       type: messageType,
       image: finalImage,
+      voice: hasVoice ? { url: voice.url, durationMs: Number(voice.durationMs || 0) } : null,
     });
   } catch (err) {
     console.error('send: server error', err);
